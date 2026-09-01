@@ -1,0 +1,991 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Voxel Soft-Body · WebGPU</title>
+<style>
+  html, body { margin:0; height:100%; overflow:hidden; background:#0e1116; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color:#e6e9ef; }
+  canvas { display:block; width:100vw; height:100vh; }
+  #ui { position:absolute; top:12px; left:12px; width:300px; background:rgba(14,17,22,0.86); border:1px solid #2a3140; border-radius:10px; padding:12px 14px; font-size:13px; backdrop-filter: blur(6px); user-select:none; }
+  #ui h1 { font-size:15px; margin:0 0 8px; font-weight:600; }
+  #ui .row { display:flex; align-items:center; justify-content:space-between; margin:6px 0; gap:8px; }
+  #ui label { flex:1; color:#b8c0cc; }
+  #ui input[type=range] { width:120px; }
+  #ui select, #ui button { background:#1b2130; color:#e6e9ef; border:1px solid #344056; border-radius:6px; padding:5px 9px; font-size:13px; cursor:pointer; }
+  #ui button:hover { background:#25304a; }
+  #ui button.primary { background:#2f6df6; border-color:#2f6df6; }
+  #ui .btns { display:flex; gap:6px; flex-wrap:wrap; margin:8px 0; }
+  #ui .help { color:#8a94a6; font-size:12px; line-height:1.45; margin-top:8px; border-top:1px solid #2a3140; padding-top:8px; }
+  #ui .val { width:40px; text-align:right; color:#8a94a6; font-variant-numeric: tabular-nums; }
+  #stats { position:absolute; right:12px; top:12px; background:rgba(14,17,22,0.86); border:1px solid #2a3140; border-radius:10px; padding:10px 12px; font-size:12px; font-variant-numeric: tabular-nums; color:#b8c0cc; line-height:1.6; min-width:170px; }
+  #stats b { color:#e6e9ef; }
+  #legend { font-size:11px; color:#b8c0cc; margin:4px 0 2px; line-height:1.5; }
+  #legend .sw { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px; }
+  #legend .bar { height:8px; border-radius:4px; background:linear-gradient(90deg,#1f2673,#26bfd9,#f2e640,#e61f1a); margin:4px 0 2px; }
+  #legend .ends { display:flex; justify-content:space-between; color:#8a94a6; }
+  #msg { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); background:rgba(14,17,22,0.9); border:1px solid #2a3140; border-radius:10px; padding:14px 18px; font-size:14px; display:none; max-width:420px; line-height:1.5; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <h1>Воксели + мягкое тело · WebGPU</h1>
+  <div class="row"><label>Сцена</label>
+    <select id="scene"></select></div>
+  <div class="row"><label>Детализация</label>
+    <select id="detail"><option value="1">1× (~2 тыс.)</option><option value="2" selected>2× (~20 тыс.)</option><option value="3">3× (~65 тыс.)</option><option value="4">4× (~150 тыс.)</option></select></div>
+  <div class="btns">
+    <button id="launch" class="primary">Запустить машину</button>
+    <button id="reset">Сброс</button>
+    <button id="pause">Пауза</button>
+  </div>
+  <div class="row"><label>Подшагов</label><input type="range" id="sub" min="4" max="20" step="1" value="10"><span class="val" id="subV">10</span></div>
+  <div class="row"><label>Жёсткость</label><input type="range" id="stiff" min="-1" max="0.4" step="0.05" value="0"><span class="val" id="stiffV">1.0</span></div>
+  <div class="row"><label>Порог разрыва</label><input type="range" id="brk" min="0.3" max="3" step="0.05" value="1"><span class="val" id="brkV">1.00</span></div>
+  <div class="row"><label>Пластичность</label><input type="range" id="plast" min="0" max="2" step="0.05" value="1"><span class="val" id="plastV">1.00</span></div>
+  <div class="row"><label>Гравитация</label><input type="range" id="grav" min="0" max="40" step="1" value="12"><span class="val" id="gravV">12</span></div>
+  <div class="row"><label>Скорость машины</label><input type="range" id="carv" min="15" max="90" step="5" value="45"><span class="val" id="carvV">45</span></div>
+  <div class="row"><label>Сила ядра</label><input type="range" id="ballv" min="10" max="120" step="5" value="60"><span class="val" id="ballvV">60</span></div>
+  <div class="row"><label>Вид</label>
+    <select id="view">
+      <option value="0">Обычный</option>
+      <option value="2">Материалы</option>
+      <option value="1">Напряжение связей</option>
+      <option value="3">Пластическая деформация</option>
+      <option value="4">Деформация (без сдвига объекта)</option>
+      <option value="5">Скорость</option>
+    </select></div>
+  <div id="legend"></div>
+  <div class="help">
+    <b>ЛКМ</b> — выстрел ядром, <b>Shift+ЛКМ</b> — взрыв<br>
+    <b>1–6</b> — переключение вида<br>
+    <b>Перетаскивание</b> — камера, <b>колесо</b> — зум<br>
+    <b>Space</b> — пауза, <b>R</b> — сброс
+  </div>
+</div>
+<div id="stats"></div>
+<div id="msg"></div>
+<canvas id="c"></canvas>
+
+<script type="module">
+'use strict';
+// ============================================================
+//  Решатель XPBD на WebGPU compute.
+//  Балки раскрашены в 26 цветов (13 направлений × чётность), каждый цвет —
+//  отдельный dispatch, внутри цвета ни одна пара балок не делит узел,
+//  поэтому получается настоящий Гаусс–Зейдель без гонок.
+//  Столкновения — spatial hash на GPU (счётчики через atomics, K слотов на ячейку).
+// ============================================================
+const MAX_BALLS = 16, MAX_OBJ = 128, K_SLOTS = 8, HASH_BITS = 18, HASH_SIZE = 1 << HASH_BITS, WG = 128;
+const STRESS_SCALE = 16384, BALL_FIX = 65536;
+const MATS = {
+  metal:  { color:[0.82,0.18,0.16], comp:2.5e-6, yieldS:0.02,  plastic:0.15, brk:0.55, dens:1.0 },
+  steel:  { color:[0.60,0.64,0.70], comp:1.5e-6, yieldS:0.03,  plastic:0.10, brk:0.70, dens:1.6 },
+  glass:  { color:[0.70,0.88,1.00], comp:1.5e-6, yieldS:9,     plastic:0,    brk:0.02, dens:0.6 },
+  brick:  { color:[0.80,0.38,0.22], comp:1.5e-6, yieldS:9,     plastic:0,    brk:0.025,dens:1.3 },
+  mortar: { color:[0.72,0.66,0.58], comp:2.5e-6, yieldS:9,     plastic:0,    brk:0.015,dens:1.2 },
+  rubber: { color:[0.13,0.13,0.15], comp:1.0e-5, yieldS:9,     plastic:0,    brk:1.5,  dens:0.8 },
+  jelly:  { color:[0.35,0.90,0.55], comp:2.5e-4, yieldS:9,     plastic:0,    brk:2.5,  dens:0.5 },
+  wood:   { color:[0.60,0.42,0.22], comp:4.0e-6, yieldS:0.05,  plastic:0.05, brk:0.09, dens:0.7 },
+  concrete:{color:[0.52,0.53,0.55], comp:1.2e-6, yieldS:9,     plastic:0,    brk:0.02, dens:1.5 },
+  anchor: { color:[0.30,0.32,0.36], comp:1.0e-6, yieldS:9,     plastic:0,    brk:9,    dens:4.0 },
+};
+// заметно различающаяся палитра для режима «Материалы»
+const MAT_VIEW = { metal:[0.95,0.25,0.25], steel:[0.75,0.78,0.85], glass:[0.35,0.75,1.0], brick:[1.0,0.55,0.2], mortar:[0.95,0.9,0.6], rubber:[0.25,0.25,0.3], jelly:[0.3,0.95,0.4], wood:[0.8,0.55,0.25], concrete:[0.6,0.6,0.65], anchor:[0.9,0.3,0.9] };
+const MAT_NAMES_RU = { metal:'металл (пластичный)', steel:'сталь', glass:'стекло (хрупкое)', brick:'кирпич (хрупкий)', mortar:'раствор (хрупкий)', rubber:'резина', jelly:'желе', wood:'дерево', concrete:'бетон (хрупкий)', anchor:'опора (статична)' };
+const MAT_LIST = Object.values(MATS), MAT_KEYS = Object.keys(MATS);
+const OFFS = [];
+for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++)
+  if (dx>0 || (dx===0 && dy>0) || (dx===0 && dy===0 && dz>0)) OFFS.push([dx,dy,dz]);
+const NCOLORS = OFFS.length * 2;
+
+// ------------------------------------------------------------ WGSL
+const COMMON = /* wgsl */`
+const K_SLOTS: u32 = ${K_SLOTS}u;
+const STRESS_SCALE: f32 = ${STRESS_SCALE}.0;
+const BALL_FIX: f32 = ${BALL_FIX}.0;
+struct Params {
+  dt: f32, dt2: f32, gravity: f32, damping: f32,
+  friction: f32, compScale: f32, brkScale: f32, plastScale: f32,
+  nNodes: u32, nBeams: u32, hashMask: u32, ballCount: u32,
+  cellInv: f32, voxel: f32, viewMode: u32, actMode: u32,
+  actObj: u32, pad0: u32, pad1: u32, pad2: u32,
+  actCenter: vec4f, actVel: vec4f,
+};
+// pos.w = обратная масса, vel.w = радиус, info = (alive, big, mat, obj | ballIdx)
+struct Node { pos: vec4f, prev: vec4f, vel: vec4f, info: vec4u };
+struct NodeNb { id: array<vec4u,2>, beam: array<vec4u,2> };
+struct Beam { i: u32, j: u32, rest: f32, rest0: f32, comp: f32, yieldS: f32, plastic: f32, brk: f32 };
+fn hashCell(c: vec3i, mask: u32) -> u32 {
+  return ((bitcast<u32>(c.x) * 73856093u) ^ (bitcast<u32>(c.y) * 19349663u) ^ (bitcast<u32>(c.z) * 83492791u)) & mask;
+}
+`;
+const K_INTEGRATE = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read_write> nodes: array<Node>;
+@compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.nNodes) { return; }
+  let n = nodes[i]; if (n.info.x == 0u) { return; }
+  var v = n.vel.xyz; if (n.pos.w > 0.0) { v.y -= P.gravity * P.dt; } else { v = vec3f(0.0); }
+  nodes[i].prev = vec4f(n.pos.xyz, 0.0);
+  nodes[i].pos = vec4f(n.pos.xyz + v * P.dt, n.pos.w);
+  nodes[i].vel = vec4f(v, n.vel.w);
+}`;
+const K_BEAMS = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read_write> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read_write> beams: array<Beam>;
+@group(0) @binding(3) var<storage, read_write> beamAlive: array<u32>;
+@group(0) @binding(4) var<storage, read_write> stat: array<atomic<u32>>; // [2i] напряжение, [2i+1] пластичность
+@group(0) @binding(5) var<storage, read_write> counters: array<atomic<u32>>;
+@group(0) @binding(6) var<uniform> range: vec4u;
+@compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
+  let k = g.x; if (k >= range.y) { return; }
+  let b = range.x + k;
+  if (beamAlive[b] == 0u) { return; }
+  let bm = beams[b]; let i = bm.i; let j = bm.j;
+  let pi = nodes[i].pos; let pj = nodes[j].pos;
+  if (nodes[i].info.x == 0u || nodes[j].info.x == 0u) { beamAlive[b] = 0u; atomicAdd(&counters[0], 1u); return; }
+  let wi = pi.w; let wj = pj.w; let w = wi + wj; if (w == 0.0) { return; }
+  let d = pj.xyz - pi.xyz; let len = length(d); if (len < 1e-7) { return; }
+  let C = len - bm.rest; let a = bm.comp * P.compScale / P.dt2;
+  let dl = -C / (w + a); let nrm = d / len;
+  nodes[i].pos = vec4f(pi.xyz - wi * dl * nrm, wi);
+  nodes[j].pos = vec4f(pj.xyz + wj * dl * nrm, wj);
+  let total = abs(len - bm.rest0) / bm.rest0; let brk = bm.brk * P.brkScale;
+  let sn = u32(clamp(total / brk, 0.0, 4.0) * STRESS_SCALE);
+  atomicMax(&stat[i * 2u], sn); atomicMax(&stat[j * 2u], sn);
+  let pn = u32(clamp(abs(bm.rest - bm.rest0) / bm.rest0, 0.0, 4.0) * STRESS_SCALE);
+  atomicMax(&stat[i * 2u + 1u], pn); atomicMax(&stat[j * 2u + 1u], pn);
+  if (total > brk) { beamAlive[b] = 0u; atomicAdd(&counters[0], 1u); return; }
+  let pl = bm.plastic * P.plastScale;
+  if (pl > 0.0) { let es = abs(len - bm.rest) / bm.rest0; if (es > bm.yieldS) { beams[b].rest = bm.rest + (len - bm.rest) * pl; } }
+}`;
+const K_HASH = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read_write> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read_write> hashCount: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read_write> hashSlots: array<u32>;
+@compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.nNodes) { return; }
+  let n = nodes[i]; if (n.info.x == 0u || n.info.y == 1u) { return; }
+  let c = vec3i(floor(n.pos.xyz * P.cellInv));
+  let h = hashCell(c, P.hashMask);
+  let slot = atomicAdd(&hashCount[h], 1u);
+  if (slot < K_SLOTS) { hashSlots[h * K_SLOTS + slot] = i; }
+}`;
+const K_COLLIDE = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read_write> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read_write> nb: array<NodeNb>;
+@group(0) @binding(3) var<storage, read_write> beamAlive: array<u32>;
+@group(0) @binding(4) var<storage, read_write> hashCount: array<u32>;
+@group(0) @binding(5) var<storage, read_write> hashSlots: array<u32>;
+@group(0) @binding(6) var<storage, read_write> balls: array<u32>;
+@group(0) @binding(7) var<storage, read_write> ballCorr: array<atomic<i32>>;
+@group(0) @binding(8) var<storage, read_write> corr: array<vec4f>;
+@compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.nNodes) { return; }
+  let n = nodes[i]; if (n.info.x == 0u || n.info.y == 1u) { return; }
+  let p = n.pos.xyz; let ri = n.vel.w; let wi = n.pos.w;
+  let mv = p - n.prev.xyz; // перемещение за подшаг (для трения)
+  let mu = P.friction * 2.0;
+  var acc = vec3f(0.0);
+  let c = vec3i(floor(p * P.cellInv));
+  let mynb = nb[i];
+  for (var dx = -1; dx <= 1; dx++) { for (var dy = -1; dy <= 1; dy++) { for (var dz = -1; dz <= 1; dz++) {
+    let h = hashCell(c + vec3i(dx, dy, dz), P.hashMask);
+    let cnt = min(hashCount[h], K_SLOTS);
+    for (var s = 0u; s < cnt; s++) {
+      let j = hashSlots[h * K_SLOTS + s]; if (j == i) { continue; }
+      let pj = nodes[j].pos; let rj = nodes[j].vel.w;
+      let d = pj.xyz - p; let dmin = ri + rj; let d2 = dot(d, d);
+      if (d2 >= dmin * dmin || d2 < 1e-12) { continue; }
+      var linked = false;
+      for (var k = 0u; k < 6u; k++) {
+        if (mynb.id[k >> 2u][k & 3u] == j && beamAlive[mynb.beam[k >> 2u][k & 3u]] != 0u) { linked = true; break; }
+      }
+      if (linked) { continue; }
+      let wj = pj.w; let w = wi + wj; if (w == 0.0) { continue; }
+      let dist = sqrt(d2); let cf = (dmin - dist) / dist / w;
+      let nrm = d / dist; let pen = dmin - dist;
+      acc -= nrm * (pen * wi / w);
+      // трение: гасим относительное касательное перемещение, не больше mu * глубины
+      let rel = mv - (pj.xyz - nodes[j].prev.xyz);
+      let tang = rel - dot(rel, nrm) * nrm; let tl = length(tang);
+      if (tl > 1e-7) { acc -= tang * (min(1.0, mu * pen / tl) * wi / w); }
+    }
+  }}}
+  // ядра
+  for (var b = 0u; b < P.ballCount; b++) {
+    let bid = balls[b]; let nbn = nodes[bid]; if (nbn.info.x == 0u) { continue; }
+    let d = nbn.pos.xyz - p; let dmin = ri + nbn.vel.w; let d2 = dot(d, d);
+    if (d2 >= dmin * dmin || d2 < 1e-12) { continue; }
+    let wb = nbn.pos.w; let w = wi + wb; let dist = sqrt(d2); let cf = (dmin - dist) / dist / w;
+    let nrm = d / dist; let pen = dmin - dist;
+    let rel = mv - (nbn.pos.xyz - nbn.prev.xyz); let tang = rel - dot(rel, nrm) * nrm; let tl = length(tang);
+    var fr = vec3f(0.0); if (tl > 1e-7) { fr = tang * min(1.0, mu * pen / tl); }
+    acc -= (nrm * pen + fr) * (wi / w);
+    let db = (nrm * pen + fr) * (wb / w * BALL_FIX);
+    atomicAdd(&ballCorr[b * 4u + 0u], i32(db.x)); atomicAdd(&ballCorr[b * 4u + 1u], i32(db.y)); atomicAdd(&ballCorr[b * 4u + 2u], i32(db.z));
+  }
+  corr[i] = vec4f(acc, 0.0);
+}`;
+const K_FINISH = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read_write> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read_write> corr: array<vec4f>;
+@group(0) @binding(3) var<storage, read_write> ballCorr: array<atomic<i32>>;
+@compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.nNodes) { return; }
+  let n = nodes[i]; if (n.info.x == 0u) { return; }
+  var p = n.pos.xyz;
+  if (n.info.y == 1u) {
+    let b = n.info.w * 4u;
+    let cx = atomicExchange(&ballCorr[b], 0); let cy = atomicExchange(&ballCorr[b + 1u], 0); let cz = atomicExchange(&ballCorr[b + 2u], 0);
+    p += vec3f(f32(cx), f32(cy), f32(cz)) / BALL_FIX;
+  } else {
+    p += corr[i].xyz; corr[i] = vec4f(0.0);
+  }
+  var prev = n.prev.xyz; let r = n.vel.w;
+  if (p.y < r) { p.y = r; let f = 1.0 - P.friction; prev.x = p.x - (p.x - prev.x) * f; prev.z = p.z - (p.z - prev.z) * f; }
+  let damp = max(0.0, 1.0 - P.damping * P.dt);
+  let v = (p - prev) / P.dt * damp;
+  nodes[i].pos = vec4f(p, n.pos.w);
+  nodes[i].vel = vec4f(v, r);
+}`;
+const K_ROTATE = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read_write> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read_write> nb: array<NodeNb>;
+@group(0) @binding(3) var<storage, read_write> beamAlive: array<u32>;
+@group(0) @binding(4) var<storage, read_write> rot: array<mat3x3f>;
+fn safeNorm(v: vec3f) -> vec3f { let l = length(v); if (l < 1e-8) { return vec3f(1.0, 0.0, 0.0); } return v / l; }
+@compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.nNodes) { return; }
+  let n = nodes[i]; if (n.info.x == 0u || n.info.y == 1u) { return; }
+  let p = n.pos.xyz; let mynb = nb[i];
+  var ax = array<vec3f, 3>(vec3f(0.0), vec3f(0.0), vec3f(0.0));
+  var has = array<bool, 3>(false, false, false);
+  for (var d = 0u; d < 6u; d++) {
+    let j = mynb.id[d >> 2u][d & 3u]; if (j == 0xffffffffu) { continue; }
+    let b = mynb.beam[d >> 2u][d & 3u]; if (beamAlive[b] == 0u) { continue; }
+    if (nodes[j].info.x == 0u) { continue; }
+    let sgn = select(1.0, -1.0, (d & 1u) == 1u);
+    let a = d >> 1u; ax[a] += (nodes[j].pos.xyz - p) * sgn; has[a] = true;
+  }
+  let cnt = u32(has[0]) + u32(has[1]) + u32(has[2]);
+  if (cnt == 0u) { return; }
+  let R = rot[i];
+  var ex = ax[0]; var ey = ax[1]; var ez = ax[2];
+  if (cnt == 1u) {
+    if (has[0]) { ey = R[1]; ez = cross(ex, ey); ey = cross(ez, ex); }
+    else if (has[1]) { ez = R[2]; ex = cross(ey, ez); ez = cross(ex, ey); }
+    else { ex = R[0]; ey = cross(ez, ex); ex = cross(ey, ez); }
+  } else if (!has[2]) { ez = cross(ex, ey); }
+  else if (!has[1]) { ey = cross(ez, ex); }
+  else if (!has[0]) { ex = cross(ey, ez); }
+  ex = safeNorm(ex); ey = safeNorm(ey - dot(ey, ex) * ex); ez = cross(ex, ey);
+  rot[i] = mat3x3f(ex, ey, ez);
+}`;
+const K_OBJSUM = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read_write> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read_write> objSum: array<atomic<i32>>;
+@compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.nNodes) { return; }
+  let n = nodes[i]; if (n.info.x == 0u || n.info.y == 1u) { return; }
+  let o = n.info.w * 4u; let p = n.pos.xyz * 64.0;
+  atomicAdd(&objSum[o], i32(p.x)); atomicAdd(&objSum[o + 1u], i32(p.y)); atomicAdd(&objSum[o + 2u], i32(p.z)); atomicAdd(&objSum[o + 3u], 1);
+}`;
+const K_ACT_NODES = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read_write> nodes: array<Node>;
+@compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.nNodes) { return; }
+  let n = nodes[i]; if (n.info.x == 0u) { return; }
+  if (P.actMode == 1u) { // запуск объекта
+    if (n.info.y == 0u && n.info.w == P.actObj) { nodes[i].vel = vec4f(P.actVel.xyz, n.vel.w); }
+  } else if (P.actMode == 2u) { // взрыв
+    let R = P.actCenter.w; let d = n.pos.xyz - P.actCenter.xyz; let d2 = dot(d, d);
+    if (d2 > R * R) { return; }
+    let dist = sqrt(d2) + 1e-4;
+    if (dist < R * 0.38 && n.info.y == 0u) { nodes[i].info.x = 0u; return; }
+    if (n.pos.w == 0.0) { return; }
+    let f = P.actVel.w * (1.0 - dist / R) * n.pos.w * 0.8;
+    nodes[i].vel = vec4f(n.vel.xyz + d / dist * f + vec3f(0.0, f * 0.35, 0.0), n.vel.w);
+  }
+}`;
+const K_ACT_BEAMS = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read_write> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read_write> beams: array<Beam>;
+@group(0) @binding(3) var<storage, read_write> beamAlive: array<u32>;
+@group(0) @binding(4) var<storage, read_write> counters: array<atomic<u32>>;
+@compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
+  let b = g.x; if (b >= P.nBeams) { return; }
+  if (P.actMode != 2u || beamAlive[b] == 0u) { return; }
+  let bm = beams[b];
+  let m = (nodes[bm.i].pos.xyz + nodes[bm.j].pos.xyz) * 0.5 - P.actCenter.xyz;
+  let Rb = P.actCenter.w * 0.55;
+  if (dot(m, m) < Rb * Rb) { beamAlive[b] = 0u; atomicAdd(&counters[0], 1u); }
+}`;
+
+// --- рендер ---
+const R_COMMON = /* wgsl */`
+struct Cam { viewProj: mat4x4f, camPos: vec4f, light: vec4f, fog: vec4f };
+fn shade(base: vec3f, nrm: vec3f, wpos: vec3f, cam: Cam) -> vec3f {
+  let l = normalize(cam.light.xyz);
+  let diff = max(dot(nrm, l), 0.0);
+  let hemi = 0.55 + 0.45 * nrm.y;
+  var c = base * (0.5 * hemi + 0.6 * diff);
+  let dist = distance(wpos, cam.camPos.xyz);
+  let f = clamp((dist - cam.fog.w) / (cam.fog.w * 1.2), 0.0, 1.0);
+  return mix(c, cam.fog.xyz, f);
+}`;
+const R_CUBES = COMMON + R_COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> cam: Cam;
+@group(0) @binding(1) var<storage, read> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read> rot: array<mat3x3f>;
+@group(0) @binding(3) var<storage, read> colors: array<vec4f>;
+@group(0) @binding(4) var<storage, read> stat: array<u32>;
+@group(0) @binding(5) var<uniform> P: Params;
+@group(0) @binding(6) var<storage, read> pos0: array<vec4f>;
+@group(0) @binding(7) var<storage, read> objSum: array<i32>;
+@group(0) @binding(8) var<storage, read> cent0: array<vec4f>;
+@group(0) @binding(9) var<uniform> palette: array<vec4f, 16>;
+struct VOut { @builtin(position) pos: vec4f, @location(0) color: vec3f, @location(1) nrm: vec3f, @location(2) wpos: vec3f };
+// тепловая карта: тёмно-синий → голубой → жёлтый → красный
+fn heat(t0: f32) -> vec3f {
+  let t = clamp(t0, 0.0, 1.0);
+  let c0 = vec3f(0.12, 0.15, 0.45); let c1 = vec3f(0.15, 0.75, 0.85); let c2 = vec3f(0.95, 0.9, 0.25); let c3 = vec3f(0.9, 0.12, 0.1);
+  if (t < 0.33) { return mix(c0, c1, t / 0.33); }
+  if (t < 0.66) { return mix(c1, c2, (t - 0.33) / 0.33); }
+  return mix(c2, c3, (t - 0.66) / 0.34);
+}
+@vertex fn vs(@location(0) vp: vec3f, @location(1) vn: vec3f, @builtin(instance_index) ii: u32) -> VOut {
+  var o: VOut;
+  let n = nodes[ii];
+  if (n.info.x == 0u || n.info.y == 1u) { o.pos = vec4f(0.0, 0.0, 2.0, 1.0); return o; }
+  let R = rot[ii]; let s = P.voxel * 0.94;
+  let wp = n.pos.xyz + R * (vp * s);
+  o.pos = cam.viewProj * vec4f(wp, 1.0);
+  o.nrm = R * vn; o.wpos = wp;
+  var col = colors[ii].xyz;
+  switch (P.viewMode) {
+    case 1u: { col = heat(f32(stat[ii * 2u]) / STRESS_SCALE); }                    // напряжение, 0..порог разрыва
+    case 2u: { col = palette[n.info.z].xyz; }                                       // материал
+    case 3u: { col = heat(f32(stat[ii * 2u + 1u]) / STRESS_SCALE / 0.2); }          // пластическая деформация, 0..20 %
+    case 4u: {                                                                      // деформация: смещение минус сдвиг центра объекта, 0..3
+      let o = n.info.w * 4u; let cnt = max(f32(objSum[o + 3u]), 1.0);
+      let c = vec3f(f32(objSum[o]), f32(objSum[o + 1u]), f32(objSum[o + 2u])) / (64.0 * cnt);
+      let d = (n.pos.xyz - c) - (pos0[ii].xyz - cent0[n.info.w].xyz);
+      col = heat(length(d) / 3.0);
+    }
+    case 5u: { col = heat(length(n.vel.xyz) / 30.0); }                              // скорость, 0..30
+    default: {}
+  }
+  o.color = col;
+  return o;
+}
+@fragment fn fs(in: VOut) -> @location(0) vec4f {
+  return vec4f(shade(in.color, normalize(in.nrm), in.wpos, cam), 1.0);
+}`;
+const R_GROUND = R_COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> cam: Cam;
+struct VOut { @builtin(position) pos: vec4f, @location(0) wpos: vec3f };
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> VOut {
+  var q = array<vec2f, 6>(vec2f(-1,-1), vec2f(1,-1), vec2f(1,1), vec2f(-1,-1), vec2f(1,1), vec2f(-1,1));
+  let e = 600.0; let p = vec3f(q[vi].x * e, 0.0, q[vi].y * e);
+  var o: VOut; o.pos = cam.viewProj * vec4f(p, 1.0); o.wpos = p; return o;
+}
+@fragment fn fs(in: VOut) -> @location(0) vec4f {
+  let cell = 5.0;
+  let g = abs(fract(in.wpos.xz / cell - 0.5) - 0.5) / fwidth(in.wpos.xz / cell);
+  let line = 1.0 - min(min(g.x, g.y), 1.0);
+  var c = mix(vec3f(0.11, 0.13, 0.17), vec3f(0.18, 0.21, 0.28), line * 0.8);
+  let dist = distance(in.wpos, cam.camPos.xyz);
+  let f = clamp((dist - cam.fog.w) / (cam.fog.w * 1.2), 0.0, 1.0);
+  return vec4f(mix(c, cam.fog.xyz, f), 1.0);
+}`;
+const R_SPHERES = COMMON + R_COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> cam: Cam;
+@group(0) @binding(1) var<storage, read> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read> balls: array<u32>;
+struct VOut { @builtin(position) pos: vec4f, @location(0) nrm: vec3f, @location(1) wpos: vec3f };
+@vertex fn vs(@location(0) vp: vec3f, @builtin(instance_index) ii: u32) -> VOut {
+  var o: VOut; let n = nodes[balls[ii]];
+  if (n.info.x == 0u) { o.pos = vec4f(0.0, 0.0, 2.0, 1.0); return o; }
+  let wp = n.pos.xyz + vp * n.vel.w;
+  o.pos = cam.viewProj * vec4f(wp, 1.0); o.nrm = vp; o.wpos = wp; return o;
+}
+@fragment fn fs(in: VOut) -> @location(0) vec4f {
+  let nrm = normalize(in.nrm); let v = normalize(cam.camPos.xyz - in.wpos);
+  let spec = pow(max(dot(reflect(-normalize(cam.light.xyz), nrm), v), 0.0), 40.0);
+  return vec4f(shade(vec3f(0.22, 0.24, 0.28), nrm, in.wpos, cam) + vec3f(spec * 0.5), 1.0);
+}`;
+
+// ------------------------------------------------------------ Построение сцены (CPU)
+class Builder {
+  constructor(k) {
+    this.k = k; this.S = 1 / k;
+    this.nodes = []; // временно: [x,y,z,invMass,radius,mat,obj]
+    this.colors = [];
+    this.maps = []; this.objCount = 0; this.pending = [];
+    this.bI = []; this.bJ = []; this.bColor = []; this.bDir = [];
+  }
+  newObject() { if (this.objCount >= MAX_OBJ) throw new Error('слишком много объектов'); this.maps.push(new Map()); return this.objCount++; }
+  // базовый воксель (в координатах грубой сетки) -> k^3 мелких
+  addVoxel(obj, ix, iy, iz, origin, matName, jitter = 0.06, fixed = false) {
+    const m = MATS[matName], k = this.k, S = this.S, map = this.maps[obj];
+    for (let a = 0; a < k; a++) for (let b = 0; b < k; b++) for (let c = 0; c < k; c++) {
+      const gx = ix * k + a, gy = iy * k + b, gz = iz * k + c;
+      const key = gx + gy * 4096 + gz * 4096 * 4096;
+      if (map.has(key)) continue;
+      const id = this.nodes.length;
+      const jit = (Math.random() * 2 - 1) * jitter;
+      this.nodes.push([origin[0] + (gx + 0.5) * S, origin[1] + (gy + 0.5) * S, origin[2] + (gz + 0.5) * S, fixed ? 0 : 1 / m.dens, 0.45 * S, m, obj]);
+      this.colors.push([Math.min(1, Math.max(0, m.color[0] + jit)), Math.min(1, Math.max(0, m.color[1] + jit)), Math.min(1, Math.max(0, m.color[2] + jit))]);
+      map.set(key, id); this.pending.push([id, gx, gy, gz, obj]);
+    }
+  }
+  finalize() {
+    for (const [i, gx, gy, gz, obj] of this.pending) {
+      const map = this.maps[obj];
+      for (let o = 0; o < OFFS.length; o++) {
+        const f = OFFS[o];
+        const j = map.get((gx + f[0]) + (gy + f[1]) * 4096 + (gz + f[2]) * 4096 * 4096);
+        if (j === undefined) continue;
+        const parity = (f[0] !== 0 ? gx : (f[1] !== 0 ? gy : gz)) & 1;
+        let dir = 255;
+        if (f[0] === 1 && f[1] === 0 && f[2] === 0) dir = 0; else if (f[0] === 0 && f[1] === 1 && f[2] === 0) dir = 2; else if (f[0] === 0 && f[1] === 0 && f[2] === 1) dir = 4;
+        this.bI.push(i); this.bJ.push(j); this.bColor.push(o * 2 + parity); this.bDir.push(dir);
+      }
+    }
+    this.pending.length = 0;
+  }
+  build() {
+    const n = this.nodes.length, nTotal = n + MAX_BALLS, nb = this.bI.length, k = this.k;
+    const nodeBuf = new ArrayBuffer(nTotal * 64), nf = new Float32Array(nodeBuf), nu = new Uint32Array(nodeBuf);
+    const colors = new Float32Array(nTotal * 4);
+    const nbArr = new Uint32Array(nTotal * 16).fill(0xffffffff);
+    for (let i = 0; i < n; i++) {
+      const v = this.nodes[i], o = i * 16;
+      nf[o] = v[0]; nf[o + 1] = v[1]; nf[o + 2] = v[2]; nf[o + 3] = v[3];
+      nf[o + 4] = v[0]; nf[o + 5] = v[1]; nf[o + 6] = v[2];
+      nf[o + 8] = 0; nf[o + 9] = 0; nf[o + 10] = 0; nf[o + 11] = v[4];
+      nu[o + 12] = 1; nu[o + 13] = 0; nu[o + 14] = MAT_LIST.indexOf(v[5]); nu[o + 15] = v[6];
+      const c = this.colors[i]; colors[i * 4] = c[0]; colors[i * 4 + 1] = c[1]; colors[i * 4 + 2] = c[2]; colors[i * 4 + 3] = 1;
+    }
+    // сортировка балок по цвету
+    const counts = new Uint32Array(NCOLORS + 1);
+    for (let b = 0; b < nb; b++) counts[this.bColor[b] + 1]++;
+    for (let c = 0; c < NCOLORS; c++) counts[c + 1] += counts[c];
+    const ranges = []; for (let c = 0; c < NCOLORS; c++) ranges.push([counts[c], counts[c + 1] - counts[c]]);
+    const cursor = counts.slice(0, NCOLORS);
+    const beamBuf = new ArrayBuffer(Math.max(nb, 1) * 32), bf = new Float32Array(beamBuf), bu = new Uint32Array(beamBuf);
+    const beamAlive = new Uint32Array(Math.max(nb, 1));
+    for (let b = 0; b < nb; b++) {
+      const dst = cursor[this.bColor[b]]++;
+      const i = this.bI[b], j = this.bJ[b];
+      const ni = this.nodes[i], nj = this.nodes[j], mi = ni[5], mj = nj[5];
+      const weak = mi.brk <= mj.brk ? mi : mj;
+      const len = Math.hypot(nj[0] - ni[0], nj[1] - ni[1], nj[2] - ni[2]);
+      const o = dst * 8;
+      bu[o] = i; bu[o + 1] = j; bf[o + 2] = len; bf[o + 3] = len;
+      bf[o + 4] = Math.max(mi.comp, mj.comp); bf[o + 5] = weak.yieldS * k; bf[o + 6] = weak.plastic; bf[o + 7] = weak.brk * k;
+      beamAlive[dst] = 1;
+      const d = this.bDir[b];
+      if (d !== 255) { nbArr[i * 16 + d] = j; nbArr[i * 16 + 8 + d] = dst; nbArr[j * 16 + (d ^ 1)] = i; nbArr[j * 16 + 8 + (d ^ 1)] = dst; }
+    }
+    const pos0 = new Float32Array(nTotal * 4); for (let i = 0; i < n; i++) { pos0[i * 4] = nf[i * 16]; pos0[i * 4 + 1] = nf[i * 16 + 1]; pos0[i * 4 + 2] = nf[i * 16 + 2]; }
+    const cent0 = new Float32Array(MAX_OBJ * 4), cnt = new Float32Array(MAX_OBJ);
+    for (let i = 0; i < n; i++) { const o = this.nodes[i][6]; if (o >= MAX_OBJ) continue; cent0[o * 4] += pos0[i * 4]; cent0[o * 4 + 1] += pos0[i * 4 + 1]; cent0[o * 4 + 2] += pos0[i * 4 + 2]; cnt[o]++; }
+    for (let o = 0; o < MAX_OBJ; o++) if (cnt[o]) { cent0[o * 4] /= cnt[o]; cent0[o * 4 + 1] /= cnt[o]; cent0[o * 4 + 2] /= cnt[o]; }
+    return { n, nTotal, nb, nodeBuf, colors, nbArr, beamBuf, beamAlive, ranges, S: this.S, pos0, cent0 };
+  }
+}
+// Все сцены строятся в «базовых» вокселях; детализация дробит каждый на k^3.
+// gy — сдвиг, при котором нижний субвоксель касается земли.
+function addCar(B, obj, x0, dir, gy, z0 = 0) {
+  const L = 22, W = 10, H = 4, o = [x0, 3 + gy, z0];
+  const X = x => dir > 0 ? x : L - 1 - x; // зеркало по x
+  for (let x = 0; x < L; x++) for (let y = 0; y < H; y++) for (let z = 0; z < W; z++) {
+    let m = 'metal';
+    if (x === 0 || x === L - 1) m = 'steel';
+    if (y === 0 && (x < 3 || x > L - 4)) m = 'steel';
+    if ((x === 4 || x === 5 || x === L - 6 || x === L - 5) && y < 2 && (z < 2 || z > W - 3)) continue;
+    B.addVoxel(obj, X(x), y, z, o, m);
+  }
+  for (let x = 6; x < 16; x++) for (let y = H; y < H + 4; y++) for (let z = 1; z < W - 1; z++) {
+    const edge = (x === 6 || x === 15 || z === 1 || z === W - 2), top = (y === H + 3);
+    if (!edge && !top) continue;
+    let m = 'metal';
+    if (edge && !top && y >= H + 1 && y <= H + 2) m = 'glass';
+    if (edge && !top && (x === 6 || x === 15) && (z === 1 || z === W - 2)) m = 'steel';
+    B.addVoxel(obj, X(x), y, z, o, m);
+  }
+  for (const cx of [5, 17]) for (const cz of [-2, W])
+    for (let x = -3; x <= 3; x++) for (let y = -3; y <= 3; y++) for (let z = 0; z < 2; z++) {
+      const r = Math.hypot(x, y); if (r > 3.2) continue;
+      B.addVoxel(obj, X(cx + x), y, cz + z, o, r < 1.2 ? 'steel' : 'rubber');
+    }
+  B.finalize();
+}
+function addBrickWall(B, obj, origin, WX, WY, WZ, opts = {}) {
+  for (let x = 0; x < WX; x++) for (let y = 0; y < WY; y++) for (let z = 0; z < WZ; z++) {
+    if (opts.skip && opts.skip(x, y, z)) continue;
+    const row = Math.floor(y / 2), shift = (row % 2) * 2;
+    const mortar = (y % 2 === 1) || ((z + shift) % 4 === 3);
+    B.addVoxel(obj, x, y, z, origin, mortar ? 'mortar' : 'brick', 0.05);
+  }
+  B.finalize();
+}
+function addBox(B, obj, origin, sx, sy, sz, mat, jitter = 0.05, fixed = false) {
+  for (let x = 0; x < sx; x++) for (let y = 0; y < sy; y++) for (let z = 0; z < sz; z++) B.addVoxel(obj, x, y, z, origin, mat, jitter, fixed);
+  B.finalize();
+}
+const SCENES = {
+  car: { name: 'Машина в стену', launchLabel: 'Запустить машину', build(B, gy) {
+    const car = B.newObject(); addCar(B, car, 0, 1, gy);
+    const wall = B.newObject(); addBrickWall(B, wall, [36, gy, -10], 2, 18, 30);
+    return { center: [20, 6, 5], dist: 70, launch: () => [{ mode: 1, obj: car, vel: [P.carSpeed, 0, 0] }] };
+  } },
+  twocars: { name: 'Лобовое: две машины', launchLabel: 'Разогнать обе', build(B, gy) {
+    const a = B.newObject(); addCar(B, a, -30, 1, gy);
+    const b = B.newObject(); addCar(B, b, 30, -1, gy);
+    return { center: [11, 6, 5], dist: 75, launch: () => [{ mode: 1, obj: a, vel: [P.carSpeed, 0, 0] }, { mode: 1, obj: b, vel: [-P.carSpeed, 0, 0] }] };
+  } },
+  materials: { name: 'Падение: сравнение материалов', build(B, gy) {
+    const mats = ['metal', 'steel', 'brick', 'concrete', 'wood', 'glass', 'rubber', 'jelly'];
+    mats.forEach((m, i) => { const o = B.newObject(); addBox(B, o, [i * 12 - 42, 22 + gy + (i % 2) * 3, -4], 8, 8, 8, m); });
+    // подставка из бетона под половиной кубов — удар о жёсткое, а не о плоскость
+    const base = B.newObject(); addBox(B, base, [-46, gy, -8], 48, 3, 16, 'concrete');
+    return { center: [0, 8, 0], dist: 95 };
+  } },
+  cantilever: { name: 'Консоли на опоре', build(B, gy) {
+    // бруски и опора — один объект, иначе между ними не будет балок (статичные узлы: fixed = true)
+    const anchor = B.newObject();
+    for (let x = 0; x < 4; x++) for (let y = 0; y < 22; y++) for (let z = 0; z < 28; z++) B.addVoxel(anchor, x, y, z, [0, gy, -2], 'anchor', 0.03, true);
+    const mats = ['steel', 'metal', 'wood', 'concrete', 'brick', 'glass', 'rubber', 'jelly'];
+    mats.forEach((m, i) => { for (let x = 0; x < 16; x++) for (let y = 0; y < 2; y++) for (let z = 0; z < 2; z++) B.addVoxel(anchor, 4 + x, 14 + y, Math.round(i * 3.5) + 1 + z, [0, gy, -2], m); });
+    // те же материалы с бетонным грузом на конце
+    mats.slice(0, 4).forEach((m, i) => {
+      for (let x = 0; x < 14; x++) for (let y = 0; y < 2; y++) for (let z = 0; z < 3; z++) B.addVoxel(anchor, 4 + x, 6 + y, i * 7 + 1 + z, [0, gy, -2], m);
+      for (let x = 0; x < 4; x++) for (let y = 0; y < 4; y++) for (let z = 0; z < 5; z++) B.addVoxel(anchor, 16 + x, 8 + y, i * 7 + z, [0, gy, -2], 'concrete');
+    });
+    B.finalize();
+    return { center: [10, 10, 12], dist: 60 };
+  } },
+  bridge: { name: 'Мост под нагрузкой', build(B, gy) {
+    // машина с колёсами занимает 14 вокселей по z, поэтому пролёт и эстакада шириной 16
+    const p1 = B.newObject(); addBrickWall(B, p1, [-22, gy, -8], 5, 12, 16);
+    const p2 = B.newObject(); addBrickWall(B, p2, [17, gy, -8], 5, 12, 16);
+    const span = B.newObject();
+    for (let x = 0; x < 44; x++) for (let y = 0; y < 3; y++) for (let z = 0; z < 16; z++) B.addVoxel(span, x, y, z, [-22, 12 + gy, -8], (z === 0 || z === 15 || y !== 1) ? 'steel' : 'metal');
+    B.finalize();
+    const load = B.newObject(); addBox(B, load, [-3, 15 + gy, 3], 6, 4, 4, 'concrete');
+    const ramp = B.newObject(); addBox(B, ramp, [-66, 13 + gy, -9], 44, 2, 18, 'anchor', 0.03, true); // статичная эстакада
+    const truck = B.newObject(); addCar(B, truck, -60, 1, 15 + gy, -5);
+    return { center: [0, 10, 0], dist: 80, launchLabel: 'Пустить машину по мосту', launch: () => [{ mode: 1, obj: truck, vel: [P.carSpeed, 0, 0] }] };
+  } },
+  jenga: { name: 'Дженга: отдельные блоки', build(B, gy) {
+    // 14 уровней по 3 бруска 12×2×4, уровни чередуют направление — проверка контактов между объектами
+    for (let lvl = 0; lvl < 14; lvl++) for (let i = 0; i < 3; i++) {
+      const o = B.newObject(); const y = lvl * 2 + gy;
+      if (lvl % 2 === 0) addBox(B, o, [-6, y, i * 4 - 6], 12, 2, 4, 'wood');
+      else addBox(B, o, [i * 4 - 6, y, -6], 4, 2, 12, 'wood');
+    }
+    // рядом стопка бетонных плит
+    for (let lvl = 0; lvl < 8; lvl++) { const o = B.newObject(); addBox(B, o, [16, lvl * 2 + gy, -5], 10, 2, 10, 'concrete'); }
+    return { center: [6, 12, 0], dist: 60 };
+  } },
+  house: { name: 'Дом', build(B, gy) {
+    const W = 24, D = 18, H = 12;
+    const found = B.newObject(); addBox(B, found, [0, gy, 0], W, 2, D, 'concrete');
+    const walls = B.newObject();
+    const win = (x, y, z) => {
+      const hollow = x > 1 && x < W - 2 && z > 1 && z < D - 2; if (hollow) return true;
+      if (y < 2) return false;
+      const door = z < 2 && x >= 10 && x <= 13 && y < 7;
+      const winX = (z < 2 || z >= D - 2) && y >= 5 && y <= 7 && ((x >= 3 && x <= 6) || (x >= 17 && x <= 20));
+      const winZ = (x < 2 || x >= W - 2) && y >= 5 && y <= 7 && ((z >= 4 && z <= 7) || (z >= 11 && z <= 14));
+      return door || winX || winZ;
+    };
+    for (let x = 0; x < W; x++) for (let y = 0; y < H; y++) for (let z = 0; z < D; z++) {
+      if (win(x, y, z)) continue;
+      const mortar = (y % 2 === 1) || ((x + z + (Math.floor(y / 2) % 2) * 2) % 4 === 3);
+      B.addVoxel(walls, x, y, z, [0, 2 + gy, 0], mortar ? 'mortar' : 'brick', 0.05);
+    }
+    // окна — стекло
+    for (let x = 0; x < W; x++) for (let y = 5; y <= 7; y++) for (let z = 0; z < D; z++) {
+      const edge = x < 2 || x >= W - 2 || z < 2 || z >= D - 2; if (!edge) continue;
+      const door = z < 2 && x >= 10 && x <= 13; if (door) continue;
+      const inner = (x === 1 || x === W - 2 || z === 1 || z === D - 2);
+      if (win(x, y, z) && inner) B.addVoxel(walls, x, y, z, [0, 2 + gy, 0], 'glass', 0.03);
+    }
+    B.finalize();
+    // двускатная крыша из деревянных досок
+    const roof = B.newObject();
+    for (let x = -1; x <= W; x++) for (let z = -1; z <= D; z++) {
+      const h = Math.max(0, 6 - Math.abs(z - (D - 1) / 2) * 0.7);
+      const y = Math.round(h);
+      B.addVoxel(roof, x, y, z, [0, H + 2 + gy, 0], 'wood', 0.06);
+      B.addVoxel(roof, x, y + 1, z, [0, H + 2 + gy, 0], 'wood', 0.06);
+    }
+    // стропила
+    for (let x = 2; x < W; x += 5) for (let z = 0; z < D; z++) { const y = Math.round(Math.max(0, 6 - Math.abs(z - (D - 1) / 2) * 0.7)); if (y > 0) B.addVoxel(roof, x, y - 1, z, [0, H + 2 + gy, 0], 'wood', 0.06); }
+    B.finalize();
+    return { center: [W / 2, 8, D / 2], dist: 65 };
+  } },
+  jelly: { name: 'Желе, башня, стекло', build(B, gy) {
+    const jelly = B.newObject(); const J = 12;
+    for (let x = 0; x < J; x++) for (let y = 0; y < J; y++) for (let z = 0; z < J; z++) B.addVoxel(jelly, x, y, z, [-6, 14, -6], 'jelly', 0.04);
+    B.finalize();
+    const tower = B.newObject();
+    for (let x = 0; x < 7; x++) for (let y = 0; y < 26; y++) for (let z = 0; z < 7; z++) {
+      const hollow = x > 0 && x < 6 && z > 0 && z < 6; if (hollow && y > 0) continue;
+      const mortar = (y % 3 === 2) || ((x + z + Math.floor(y / 3)) % 3 === 0);
+      B.addVoxel(tower, x, y, z, [16, gy, -3.5], mortar ? 'mortar' : 'brick', 0.05);
+    }
+    B.finalize();
+    const glass = B.newObject();
+    for (let x = 0; x < 2; x++) for (let y = 0; y < 14; y++) for (let z = 0; z < 18; z++) {
+      const frame = y === 0 || y === 13 || z === 0 || z === 17;
+      B.addVoxel(glass, x, y, z, [-18, gy, -9], frame ? 'steel' : 'glass', frame ? 0.06 : 0.03);
+    }
+    B.finalize();
+    const beam = B.newObject();
+    for (let x = 0; x < 30; x++) for (let y = 0; y < 2; y++) for (let z = 0; z < 3; z++) B.addVoxel(beam, x, y, z, [-12, 26 + gy, 10], 'metal');
+    for (const x of [0, 1, 28, 29]) for (let y = 0; y < 26; y++) for (let z = 0; z < 3; z++) B.addVoxel(beam, x, -1 - y, z, [-12, 26 + gy, 10], 'steel');
+    B.finalize();
+    return { center: [0, 8, 0], dist: 60 };
+  } },
+};
+
+// ------------------------------------------------------------ матрицы
+function perspective(fovy, aspect, near, far) {
+  const f = 1 / Math.tan(fovy / 2); const m = new Float32Array(16);
+  m[0] = f / aspect; m[5] = f; m[10] = far / (near - far); m[11] = -1; m[14] = near * far / (near - far); return m;
+}
+function lookAt(eye, t, up) {
+  const zx = eye[0] - t[0], zy = eye[1] - t[1], zz = eye[2] - t[2]; let l = Math.hypot(zx, zy, zz); const z = [zx / l, zy / l, zz / l];
+  let x = [up[1] * z[2] - up[2] * z[1], up[2] * z[0] - up[0] * z[2], up[0] * z[1] - up[1] * z[0]]; l = Math.hypot(...x); x = x.map(v => v / l);
+  const y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
+  const m = new Float32Array(16);
+  m[0] = x[0]; m[1] = y[0]; m[2] = z[0]; m[4] = x[1]; m[5] = y[1]; m[6] = z[1]; m[8] = x[2]; m[9] = y[2]; m[10] = z[2];
+  m[12] = -(x[0] * eye[0] + x[1] * eye[1] + x[2] * eye[2]); m[13] = -(y[0] * eye[0] + y[1] * eye[1] + y[2] * eye[2]); m[14] = -(z[0] * eye[0] + z[1] * eye[1] + z[2] * eye[2]); m[15] = 1;
+  return m;
+}
+function mul(a, b) { const m = new Float32Array(16); for (let c = 0; c < 4; c++) for (let r = 0; r < 4; r++) { let s = 0; for (let k = 0; k < 4; k++) s += a[k * 4 + r] * b[c * 4 + k]; m[c * 4 + r] = s; } return m; }
+function invert(m) { // общая инверсия 4x4
+  const inv = new Float32Array(16), a = m;
+  inv[0] = a[5]*a[10]*a[15]-a[5]*a[11]*a[14]-a[9]*a[6]*a[15]+a[9]*a[7]*a[14]+a[13]*a[6]*a[11]-a[13]*a[7]*a[10];
+  inv[4] = -a[4]*a[10]*a[15]+a[4]*a[11]*a[14]+a[8]*a[6]*a[15]-a[8]*a[7]*a[14]-a[12]*a[6]*a[11]+a[12]*a[7]*a[10];
+  inv[8] = a[4]*a[9]*a[15]-a[4]*a[11]*a[13]-a[8]*a[5]*a[15]+a[8]*a[7]*a[13]+a[12]*a[5]*a[11]-a[12]*a[7]*a[9];
+  inv[12] = -a[4]*a[9]*a[14]+a[4]*a[10]*a[13]+a[8]*a[5]*a[14]-a[8]*a[6]*a[13]-a[12]*a[5]*a[10]+a[12]*a[6]*a[9];
+  inv[1] = -a[1]*a[10]*a[15]+a[1]*a[11]*a[14]+a[9]*a[2]*a[15]-a[9]*a[3]*a[14]-a[13]*a[2]*a[11]+a[13]*a[3]*a[10];
+  inv[5] = a[0]*a[10]*a[15]-a[0]*a[11]*a[14]-a[8]*a[2]*a[15]+a[8]*a[3]*a[14]+a[12]*a[2]*a[11]-a[12]*a[3]*a[10];
+  inv[9] = -a[0]*a[9]*a[15]+a[0]*a[11]*a[13]+a[8]*a[1]*a[15]-a[8]*a[3]*a[13]-a[12]*a[1]*a[11]+a[12]*a[3]*a[9];
+  inv[13] = a[0]*a[9]*a[14]-a[0]*a[10]*a[13]-a[8]*a[1]*a[14]+a[8]*a[2]*a[13]+a[12]*a[1]*a[10]-a[12]*a[2]*a[9];
+  inv[2] = a[1]*a[6]*a[15]-a[1]*a[7]*a[14]-a[5]*a[2]*a[15]+a[5]*a[3]*a[14]+a[13]*a[2]*a[7]-a[13]*a[3]*a[6];
+  inv[6] = -a[0]*a[6]*a[15]+a[0]*a[7]*a[14]+a[4]*a[2]*a[15]-a[4]*a[3]*a[14]-a[12]*a[2]*a[7]+a[12]*a[3]*a[6];
+  inv[10] = a[0]*a[5]*a[15]-a[0]*a[7]*a[13]-a[4]*a[1]*a[15]+a[4]*a[3]*a[13]+a[12]*a[1]*a[7]-a[12]*a[3]*a[5];
+  inv[14] = -a[0]*a[5]*a[14]+a[0]*a[6]*a[13]+a[4]*a[1]*a[14]-a[4]*a[2]*a[13]-a[12]*a[1]*a[6]+a[12]*a[2]*a[5];
+  inv[3] = -a[1]*a[6]*a[11]+a[1]*a[7]*a[10]+a[5]*a[2]*a[11]-a[5]*a[3]*a[10]-a[9]*a[2]*a[7]+a[9]*a[3]*a[6];
+  inv[7] = a[0]*a[6]*a[11]-a[0]*a[7]*a[10]-a[4]*a[2]*a[11]+a[4]*a[3]*a[10]+a[8]*a[2]*a[7]-a[8]*a[3]*a[6];
+  inv[11] = -a[0]*a[5]*a[11]+a[0]*a[7]*a[9]+a[4]*a[1]*a[11]-a[4]*a[3]*a[9]-a[8]*a[1]*a[7]+a[8]*a[3]*a[5];
+  inv[15] = a[0]*a[5]*a[10]-a[0]*a[6]*a[9]-a[4]*a[1]*a[10]+a[4]*a[2]*a[9]+a[8]*a[1]*a[6]-a[8]*a[2]*a[5];
+  let det = a[0]*inv[0]+a[1]*inv[4]+a[2]*inv[8]+a[3]*inv[12]; det = 1/det; for (let i = 0; i < 16; i++) inv[i] *= det; return inv;
+}
+function cubeVerts() {
+  const faces = [[[1,0,0],[0,1,0],[0,0,1]], [[-1,0,0],[0,0,1],[0,1,0]], [[0,1,0],[0,0,1],[1,0,0]], [[0,-1,0],[1,0,0],[0,0,1]], [[0,0,1],[1,0,0],[0,1,0]], [[0,0,-1],[0,1,0],[1,0,0]]];
+  const out = [];
+  for (const [n, u, v] of faces) {
+    const c = (su, sv) => [n[0]*0.5 + u[0]*su*0.5 + v[0]*sv*0.5, n[1]*0.5 + u[1]*su*0.5 + v[1]*sv*0.5, n[2]*0.5 + u[2]*su*0.5 + v[2]*sv*0.5];
+    for (const p of [c(-1,-1), c(1,-1), c(1,1), c(-1,-1), c(1,1), c(-1,1)]) out.push(...p, ...n);
+  }
+  return new Float32Array(out);
+}
+function sphereVerts(la = 12, lo = 18) {
+  const out = []; const pt = (i, j) => { const th = Math.PI * i / la, ph = 2 * Math.PI * j / lo; return [Math.sin(th) * Math.cos(ph), Math.cos(th), Math.sin(th) * Math.sin(ph)]; };
+  for (let i = 0; i < la; i++) for (let j = 0; j < lo; j++) { const a = pt(i, j), b = pt(i + 1, j), c = pt(i + 1, j + 1), d = pt(i, j + 1); out.push(...a, ...b, ...c, ...a, ...c, ...d); }
+  return new Float32Array(out);
+}
+
+// ------------------------------------------------------------ WebGPU
+const ui = id => document.getElementById(id);
+const msg = t => { const m = ui('msg'); m.style.display = t ? 'block' : 'none'; m.textContent = t || ''; };
+const canvas = ui('c');
+const P = { substeps: 10, gravity: 12, damping: 0.6, friction: 0.15, compScale: 1, brkScale: 1, plastScale: 1, viewMode: 0, ballSpeed: 60, carSpeed: 45 };
+
+let device, ctx, format, sim = null, paused = false, sceneInfo = null;
+const cam = { theta: 0.9, phi: 1.1, dist: 70, target: [24, 6, 5] };
+
+async function initGPU() {
+  if (!navigator.gpu) { msg('WebGPU не поддерживается этим браузером. Нужен Chrome / Edge / Safari 26+.'); throw new Error('no webgpu'); }
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+  if (!adapter) { msg('Не удалось получить WebGPU-адаптер.'); throw new Error('no adapter'); }
+  device = await adapter.requestDevice({ requiredLimits: { maxStorageBufferBindingSize: Math.min(adapter.limits.maxStorageBufferBindingSize, 1 << 30), maxBufferSize: Math.min(adapter.limits.maxBufferSize, 1 << 30) } });
+  device.lost.then(info => msg('GPU device lost: ' + info.message));
+  ctx = canvas.getContext('webgpu'); format = navigator.gpu.getPreferredCanvasFormat();
+  ctx.configure({ device, format, alphaMode: 'opaque' });
+}
+
+function makeCompute(code) {
+  const module = device.createShaderModule({ code });
+  return device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' } });
+}
+function bind(pipeline, buffers, group = 0) {
+  return device.createBindGroup({ layout: pipeline.getBindGroupLayout(group), entries: buffers.map((b, i) => ({ binding: i, resource: { buffer: b } })) });
+}
+function buf(size, usage, data) {
+  const b = device.createBuffer({ size: Math.max(16, Math.ceil(size / 16) * 16), usage, mappedAtCreation: !!data });
+  if (data) { new Uint8Array(b.getMappedRange()).set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength)); b.unmap(); }
+  return b;
+}
+const ST = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
+
+let pipes = null, renderPipes = null, geo = null, msaa = null;
+function initPipelines() {
+  pipes = { integrate: makeCompute(K_INTEGRATE), beams: makeCompute(K_BEAMS), hash: makeCompute(K_HASH), collide: makeCompute(K_COLLIDE), finish: makeCompute(K_FINISH), rotate: makeCompute(K_ROTATE), objsum: makeCompute(K_OBJSUM), actNodes: makeCompute(K_ACT_NODES), actBeams: makeCompute(K_ACT_BEAMS) };
+  const mk = (code, buffers, cull, extra = {}) => device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: device.createShaderModule({ code }), entryPoint: 'vs', buffers },
+    fragment: { module: device.createShaderModule({ code }), entryPoint: 'fs', targets: [{ format }] },
+    primitive: { topology: 'triangle-list', cullMode: cull },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' },
+    multisample: { count: 4 }, ...extra });
+  renderPipes = {
+    cubes: mk(R_CUBES, [{ arrayStride: 24, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }, { shaderLocation: 1, offset: 12, format: 'float32x3' }] }], 'back'),
+    ground: mk(R_GROUND, [], 'none'),
+    spheres: mk(R_SPHERES, [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }], 'back'),
+  };
+  const cv = cubeVerts(), sv = sphereVerts();
+  geo = { cube: buf(cv.byteLength, GPUBufferUsage.VERTEX, cv), sphere: buf(sv.byteLength, GPUBufferUsage.VERTEX, sv), sphereCount: sv.length / 3 };
+}
+
+function createSim(data) {
+  if (sim) { for (const b of Object.values(sim.buffers)) b.destroy(); }
+  const B = {};
+  B.params = buf(128, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+  B.cam = buf(112, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+  B.nodes = buf(data.nTotal * 64, ST, new Uint8Array(data.nodeBuf));
+  B.nb = buf(data.nTotal * 64, ST, data.nbArr);
+  B.colors = buf(data.nTotal * 16, ST, data.colors);
+  B.beams = buf(Math.max(data.nb, 1) * 32, ST, new Uint8Array(data.beamBuf));
+  B.beamAlive = buf(Math.max(data.nb, 1) * 4, ST, data.beamAlive);
+  B.stat = buf(data.nTotal * 8, ST);
+  B.objSum = buf(MAX_OBJ * 16, ST);
+  B.cent0 = buf(MAX_OBJ * 16, ST, data.cent0);
+  B.counters = buf(64, ST);
+  B.corr = buf(data.nTotal * 16, ST);
+  B.hashCount = buf(HASH_SIZE * 4, ST);
+  B.hashSlots = buf(HASH_SIZE * K_SLOTS * 4, ST);
+  B.balls = buf(MAX_BALLS * 4, ST);
+  B.ballCorr = buf(MAX_BALLS * 16, ST);
+  const rotInit = new Float32Array(data.nTotal * 12); for (let i = 0; i < data.nTotal; i++) { rotInit[i * 12] = 1; rotInit[i * 12 + 5] = 1; rotInit[i * 12 + 10] = 1; }
+  B.rot = buf(data.nTotal * 48, ST, rotInit);
+  B.pos0 = buf(data.nTotal * 16, ST, data.pos0);
+  const pal = new Float32Array(64); MAT_KEYS.forEach((k, i) => { const c = MAT_VIEW[k]; pal[i * 4] = c[0]; pal[i * 4 + 1] = c[1]; pal[i * 4 + 2] = c[2]; pal[i * 4 + 3] = 1; });
+  B.palette = buf(256, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, pal);
+  B.ranges = data.ranges.map(r => buf(16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, new Uint32Array([r[0], r[1], 0, 0])));
+  B.statStaging = [0, 1, 2].map(() => buf(64, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST));
+  B.pickStaging = buf(data.nTotal * 64, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);
+  const flat = Object.assign({}, B); delete flat.ranges; delete flat.statStaging; const bufs = { ...flat }; data.ranges.forEach((r, i) => bufs['range' + i] = B.ranges[i]); B.statStaging.forEach((s, i) => bufs['stat' + i] = s);
+  const groups = {
+    integrate: bind(pipes.integrate, [B.params, B.nodes]),
+    beams: B.ranges.map(r => bind(pipes.beams, [B.params, B.nodes, B.beams, B.beamAlive, B.stat, B.counters, r])),
+    objsum: bind(pipes.objsum, [B.params, B.nodes, B.objSum]),
+    hash: bind(pipes.hash, [B.params, B.nodes, B.hashCount, B.hashSlots]),
+    collide: bind(pipes.collide, [B.params, B.nodes, B.nb, B.beamAlive, B.hashCount, B.hashSlots, B.balls, B.ballCorr, B.corr]),
+    finish: bind(pipes.finish, [B.params, B.nodes, B.corr, B.ballCorr]),
+    rotate: bind(pipes.rotate, [B.params, B.nodes, B.nb, B.beamAlive, B.rot]),
+    actNodes: bind(pipes.actNodes, [B.params, B.nodes]),
+    actBeams: bind(pipes.actBeams, [B.params, B.nodes, B.beams, B.beamAlive, B.counters]),
+    cubes: bind(renderPipes.cubes, [B.cam, B.nodes, B.rot, B.colors, B.stat, B.params, B.pos0, B.objSum, B.cent0, B.palette]),
+    ground: bind(renderPipes.ground, [B.cam]),
+    spheres: bind(renderPipes.spheres, [B.cam, B.nodes, B.balls]),
+  };
+  sim = { n: data.n, nTotal: data.nTotal, nb: data.nb, S: data.S, ranges: data.ranges, buffers: bufs, B, groups, ballCount: 0, ballNext: 0, ballIds: new Uint32Array(MAX_BALLS), broken: 0, statIdx: 0, statBusy: [false, false, false], pickBusy: false, actions: [] };
+}
+
+// жёстче связи — выше их частота (∝ √k), нужен пропорционально меньший подшаг
+function effSubsteps() { return Math.ceil(P.substeps * Math.max(1, Math.sqrt(1 / P.compScale))); }
+function writeParams(action) {
+  const f = new Float32Array(32), u = new Uint32Array(f.buffer);
+  const dt = 1 / 60 / effSubsteps();
+  f[0] = dt; f[1] = dt * dt; f[2] = P.gravity; f[3] = P.damping; f[4] = P.friction; f[5] = P.compScale; f[6] = P.brkScale; f[7] = P.plastScale;
+  u[8] = sim.nTotal; u[9] = sim.nb; u[10] = HASH_SIZE - 1; u[11] = sim.ballCount;
+  f[12] = 1 / sim.S; f[13] = sim.S; u[14] = P.viewMode; u[15] = action ? action.mode : 0;
+  u[16] = action && action.obj !== undefined ? action.obj : 0;
+  if (action) { f[20] = action.center[0]; f[21] = action.center[1]; f[22] = action.center[2]; f[23] = action.radius; f[24] = action.vel[0]; f[25] = action.vel[1]; f[26] = action.vel[2]; f[27] = action.strength; }
+  device.queue.writeBuffer(sim.B.params, 0, f);
+}
+function writeCam() {
+  const aspect = canvas.width / canvas.height;
+  const t = cam.target, sp = Math.sin(cam.phi);
+  const eye = [t[0] + cam.dist * sp * Math.cos(cam.theta), t[1] + cam.dist * Math.cos(cam.phi), t[2] + cam.dist * sp * Math.sin(cam.theta)];
+  const view = lookAt(eye, t, [0, 1, 0]), proj = perspective(55 * Math.PI / 180, aspect, 0.1, 800);
+  const vp = mul(proj, view);
+  const f = new Float32Array(28); f.set(vp, 0); f.set([eye[0], eye[1], eye[2], 1], 16); f.set([0.5, 1, 0.35, 0], 20); f.set([0.055, 0.067, 0.086, 140], 24);
+  device.queue.writeBuffer(sim.B.cam, 0, f);
+  return { eye, vp };
+}
+
+let loopEnabled = true;
+function frame() { requestAnimationFrame(frame); if (loopEnabled) tick(); }
+function tick() {
+  if (!sim) return;
+  const now = performance.now(); frameMs = frameMs * 0.9 + (now - lastT) * 0.1; lastT = now;
+  const dpr = Math.min(devicePixelRatio, 2); const w = Math.floor(canvas.clientWidth * dpr), h = Math.floor(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h || !msaa) {
+    canvas.width = w; canvas.height = h;
+    if (msaa) { msaa.color.destroy(); msaa.depth.destroy(); }
+    msaa = { color: device.createTexture({ size: [w, h], sampleCount: 4, format, usage: GPUTextureUsage.RENDER_ATTACHMENT }), depth: device.createTexture({ size: [w, h], sampleCount: 4, format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT }) };
+  }
+  const action = sim.actions.shift() || null;
+  writeParams(action);
+  const { eye, vp } = writeCam();
+  const B = sim.B, G = sim.groups, nG = Math.ceil(sim.nTotal / WG);
+  const enc = device.createCommandEncoder();
+  if (action) {
+    const p = enc.beginComputePass();
+    p.setPipeline(pipes.actBeams); p.setBindGroup(0, G.actBeams); p.dispatchWorkgroups(Math.ceil(sim.nb / WG));
+    p.setPipeline(pipes.actNodes); p.setBindGroup(0, G.actNodes); p.dispatchWorkgroups(nG);
+    p.end();
+  }
+  if (!paused) {
+    enc.clearBuffer(B.stat);
+    const nSub = effSubsteps();
+    for (let s = 0; s < nSub; s++) {
+      let p = enc.beginComputePass();
+      p.setPipeline(pipes.integrate); p.setBindGroup(0, G.integrate); p.dispatchWorkgroups(nG);
+      p.setPipeline(pipes.beams);
+      for (let c = 0; c < NCOLORS; c++) { const cnt = sim.ranges[c][1]; if (!cnt) continue; p.setBindGroup(0, G.beams[c]); p.dispatchWorkgroups(Math.ceil(cnt / WG)); }
+      p.end();
+      enc.clearBuffer(B.hashCount);
+      p = enc.beginComputePass();
+      p.setPipeline(pipes.hash); p.setBindGroup(0, G.hash); p.dispatchWorkgroups(nG);
+      p.setPipeline(pipes.collide); p.setBindGroup(0, G.collide); p.dispatchWorkgroups(nG);
+      p.setPipeline(pipes.finish); p.setBindGroup(0, G.finish); p.dispatchWorkgroups(nG);
+      p.end();
+    }
+  }
+  enc.clearBuffer(B.objSum);
+  { const p = enc.beginComputePass(); p.setPipeline(pipes.rotate); p.setBindGroup(0, G.rotate); p.dispatchWorkgroups(nG); p.setPipeline(pipes.objsum); p.setBindGroup(0, G.objsum); p.dispatchWorkgroups(nG); p.end(); }
+  // статистика
+  const si = sim.statIdx; let statCopied = false;
+  if (!sim.statBusy[si]) { enc.copyBufferToBuffer(B.counters, 0, B.statStaging[si], 0, 64); sim.statBusy[si] = true; statCopied = true; }
+  // выборка позиций для клика
+  let pickCopied = false;
+  if (pickRequest && !sim.pickBusy) { enc.copyBufferToBuffer(B.nodes, 0, B.pickStaging, 0, sim.nTotal * 64); sim.pickBusy = true; pickCopied = true; }
+  // рендер
+  const pass = enc.beginRenderPass({
+    colorAttachments: [{ view: msaa.color.createView(), resolveTarget: ctx.getCurrentTexture().createView(), clearValue: { r: 0.055, g: 0.067, b: 0.086, a: 1 }, loadOp: 'clear', storeOp: 'discard' }],
+    depthStencilAttachment: { view: msaa.depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'discard' } });
+  pass.setPipeline(renderPipes.ground); pass.setBindGroup(0, G.ground); pass.draw(6);
+  pass.setPipeline(renderPipes.cubes); pass.setBindGroup(0, G.cubes); pass.setVertexBuffer(0, geo.cube); pass.draw(36, sim.n);
+  if (sim.ballCount) { pass.setPipeline(renderPipes.spheres); pass.setBindGroup(0, G.spheres); pass.setVertexBuffer(0, geo.sphere); pass.draw(geo.sphereCount, sim.ballCount); }
+  pass.end();
+  device.queue.submit([enc.finish()]);
+  if (statCopied) { const sb = B.statStaging[si]; const mine = sim; sim.statIdx = (si + 1) % 3;
+    sb.mapAsync(GPUMapMode.READ).then(() => { if (sim !== mine) return; const u = new Uint32Array(sb.getMappedRange()); sim.broken = u[0]; sb.unmap(); sim.statBusy[si] = false; }).catch(() => {}); }
+  if (pickCopied) { const req = pickRequest; pickRequest = null; const mine = sim;
+    B.pickStaging.mapAsync(GPUMapMode.READ).then(() => { if (sim !== mine) return; const f = new Float32Array(B.pickStaging.getMappedRange()); const u = new Uint32Array(f.buffer); resolvePick(req, f, u, eye, vp); B.pickStaging.unmap(); sim.pickBusy = false; }).catch(() => {}); }
+  frames++; if (now - fpsT > 500) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now;
+    ui('stats').innerHTML = `<b>${fps.toFixed(0)}</b> fps · кадр <b>${frameMs.toFixed(1)}</b> мс<br>вокселей: <b>${sim.n.toLocaleString('ru')}</b><br>балок: <b>${(sim.nb - sim.broken).toLocaleString('ru')}</b> / ${sim.nb.toLocaleString('ru')}<br>сломано: <b>${sim.broken.toLocaleString('ru')}</b><br>подшагов: ${effSubsteps()}${effSubsteps() !== P.substeps ? ' (' + P.substeps + ' × √жёсткости)' : ''}<br>dispatch/кадр: ${paused ? 2 : effSubsteps() * (NCOLORS + 4) + 2}`; }
+}
+let lastT = performance.now(), frameMs = 16, fpsT = performance.now(), frames = 0, fps = 0, pickRequest = null;
+
+// ------------------------------------------------------------ действия
+function spawnBall(origin, dir) {
+  const idx = sim.ballNext % MAX_BALLS; sim.ballNext++;
+  const id = sim.n + idx; sim.ballIds[idx] = id; sim.ballCount = Math.min(MAX_BALLS, sim.ballNext);
+  const f = new Float32Array(16), u = new Uint32Array(f.buffer);
+  const r = 1.3, sp = P.ballSpeed;
+  f[0] = origin[0]; f[1] = origin[1]; f[2] = origin[2]; f[3] = 1 / 40;
+  f[4] = origin[0]; f[5] = origin[1]; f[6] = origin[2];
+  f[8] = dir[0] * sp; f[9] = dir[1] * sp; f[10] = dir[2] * sp; f[11] = r;
+  u[12] = 1; u[13] = 1; u[14] = 1; u[15] = idx;
+  device.queue.writeBuffer(sim.B.nodes, id * 64, f);
+  device.queue.writeBuffer(sim.B.balls, 0, sim.ballIds);
+}
+function resolvePick(req, f, u, eye, vp) {
+  // луч из камеры через пиксель
+  const inv = invert(vp);
+  const nx = (req.x / canvas.clientWidth) * 2 - 1, ny = -(req.y / canvas.clientHeight) * 2 + 1;
+  const unproj = (z) => { const v = [inv[0]*nx + inv[4]*ny + inv[8]*z + inv[12], inv[1]*nx + inv[5]*ny + inv[9]*z + inv[13], inv[2]*nx + inv[6]*ny + inv[10]*z + inv[14], inv[3]*nx + inv[7]*ny + inv[11]*z + inv[15]]; return [v[0]/v[3], v[1]/v[3], v[2]/v[3]]; };
+  const a = unproj(0), b = unproj(1); let d = [b[0]-a[0], b[1]-a[1], b[2]-a[2]]; const l = Math.hypot(...d); d = d.map(v => v / l);
+  let tBest = Infinity;
+  if (d[1] < 0) tBest = -eye[1] / d[1]; // земля
+  const rr = (0.6 * sim.S) ** 2;
+  for (let i = 0; i < sim.n; i++) { const o = i * 16; if (u[o + 12] === 0) continue;
+    const ox = f[o] - eye[0], oy = f[o+1] - eye[1], oz = f[o+2] - eye[2];
+    const tc = ox*d[0] + oy*d[1] + oz*d[2]; if (tc < 0 || tc > tBest) continue;
+    const d2 = ox*ox + oy*oy + oz*oz - tc*tc; if (d2 < rr) tBest = tc; }
+  if (!isFinite(tBest)) return;
+  const pt = [eye[0] + d[0]*tBest, eye[1] + d[1]*tBest, eye[2] + d[2]*tBest];
+  if (req.shift) sim.actions.push({ mode: 2, center: pt, radius: 7, vel: [0,0,0], strength: 60 });
+  else spawnBall([eye[0] + d[0]*3, eye[1] + d[1]*3, eye[2] + d[2]*3], d);
+}
+
+// ------------------------------------------------------------ UI
+async function resetScene() {
+  const k = +ui('detail').value;
+  msg('Строю сцену…'); await new Promise(r => setTimeout(r, 20));
+  const t0 = performance.now();
+  const subEl = ui('sub'); subEl.value = String(6 + 4 * k); subEl.dispatchEvent(new Event('input'));
+  const B = new Builder(k);
+  const sc = SCENES[ui('scene').value];
+  sceneInfo = sc.build(B, -0.05 * B.S);
+  const data = B.build();
+  createSim(data);
+  cam.target = sceneInfo.center.slice(); if (sceneInfo.dist) cam.dist = sceneInfo.dist;
+  ui('launch').style.display = sceneInfo.launch ? '' : 'none';
+  ui('launch').textContent = sceneInfo.launchLabel || sc.launchLabel || 'Запустить';
+  msg(''); console.log(`scene: ${data.n} nodes, ${data.nb} beams, build ${(performance.now() - t0).toFixed(0)} ms`);
+}
+ui('scene').addEventListener('change', resetScene);
+ui('detail').addEventListener('change', resetScene);
+ui('reset').addEventListener('click', resetScene);
+function launch() { if (!sim || !sceneInfo.launch) return; for (const a of sceneInfo.launch()) sim.actions.push({ center: [0,0,0], radius: 0, strength: 0, ...a }); }
+ui('launch').addEventListener('click', launch);
+ui('pause').addEventListener('click', () => { paused = !paused; ui('pause').textContent = paused ? 'Продолжить' : 'Пауза'; });
+function bindSlider(id, fn, fmt) { const el = ui(id); const upd = () => { fn(+el.value); ui(id + 'V').textContent = fmt(+el.value); }; el.addEventListener('input', upd); upd(); }
+bindSlider('sub', v => { P.substeps = v; }, v => v.toFixed(0));
+bindSlider('stiff', v => { P.compScale = Math.pow(10, -v); }, v => Math.pow(10, v).toFixed(1));
+bindSlider('brk', v => { P.brkScale = v; }, v => v.toFixed(2));
+bindSlider('plast', v => { P.plastScale = v; }, v => v.toFixed(2));
+bindSlider('grav', v => { P.gravity = v; }, v => v.toFixed(0));
+bindSlider('carv', v => { P.carSpeed = v; }, v => v.toFixed(0));
+bindSlider('ballv', v => { P.ballSpeed = v; }, v => v.toFixed(0));
+for (const [key, sc] of Object.entries(SCENES)) { const o = document.createElement('option'); o.value = key; o.textContent = sc.name; ui('scene').appendChild(o); }
+const LEGENDS = { 1: ['0', 'порог разрыва'], 3: ['0 %', '20 % остаточной деформации'], 4: ['0', '3 ед. от формы в покое'], 5: ['0', '30 ед/с'] };
+function updateLegend() {
+  const m = P.viewMode, el = ui('legend');
+  if (m === 2) el.innerHTML = MAT_KEYS.map(k => { const c = MAT_VIEW[k]; return `<span class="sw" style="background:rgb(${c.map(v => Math.round(v * 255)).join(',')})"></span>${MAT_NAMES_RU[k]}`; }).join('<br>');
+  else if (LEGENDS[m]) el.innerHTML = `<div class="bar"></div><div class="ends"><span>${LEGENDS[m][0]}</span><span>${LEGENDS[m][1]}</span></div>`;
+  else el.innerHTML = '';
+}
+ui('view').addEventListener('change', e => { P.viewMode = +e.target.value; updateLegend(); });
+updateLegend();
+window.addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); ui('pause').click(); } if (e.key === 'r' || e.key === 'R' || e.key === 'к' || e.key === 'К') resetScene();
+  const views = { Digit1: 0, Digit2: 2, Digit3: 1, Digit4: 3, Digit5: 4, Digit6: 5 }; if (e.code in views) { ui('view').value = String(views[e.code]); ui('view').dispatchEvent(new Event('change')); } });
+let dragging = false, moved = 0, lx = 0, ly = 0;
+canvas.addEventListener('mousedown', e => { dragging = true; moved = 0; lx = e.clientX; ly = e.clientY; });
+window.addEventListener('mousemove', e => { if (!dragging) return; const dx = e.clientX - lx, dy = e.clientY - ly; lx = e.clientX; ly = e.clientY; moved += Math.abs(dx) + Math.abs(dy);
+  cam.theta += dx * 0.006; cam.phi = Math.min(Math.PI / 2 - 0.05, Math.max(0.15, cam.phi - dy * 0.006)); });
+window.addEventListener('mouseup', e => { if (!dragging) return; dragging = false; if (moved < 5 && sim) pickRequest = { x: e.clientX, y: e.clientY, shift: e.shiftKey }; });
+canvas.addEventListener('wheel', e => { e.preventDefault(); cam.dist = Math.min(300, Math.max(8, cam.dist * Math.exp(e.deltaY * 0.0015))); }, { passive: false });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+// экспорт для отладки
+window.dbg = { get sim() { return sim; }, P, cam, get device() { return device; }, resetScene, spawnBall, tick, setPaused: v => { paused = v; }, setLoop: v => { loopEnabled = v; }, setAction: a => { sim.actions.push(a); }, launch,
+  bench: async (n) => { const t0 = performance.now(); for (let i = 0; i < n; i++) { tick(); await device.queue.onSubmittedWorkDone(); } return (performance.now() - t0) / n; } };
+
+try { await initGPU(); initPipelines(); await resetScene(); requestAnimationFrame(frame); }
+catch (e) { console.error(e); if (!ui('msg').textContent) msg('Ошибка инициализации: ' + e.message); }
+</script>
+</body>
+</html>
