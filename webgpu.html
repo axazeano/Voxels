@@ -109,20 +109,24 @@ const STRESS_SCALE = 16384, BALL_FIX = 65536;
 // Единица массы симуляции = 1 ед^3 материала плотностью 1 т/м^3 = 8 кг.
 const M_PER_UNIT = 0.2, KG_PER_SIM = 1000 * M_PER_UNIT ** 3;
 // yieldS — предел текучести, делённый на модуль (безразмерная деформация начала
-// пластики), поэтому от детализации не зависит. rho — настоящая плотность, т/м^3. E — модуль упругости в единицах симуляции:
+// пластики), поэтому от детализации не зависит. У конструкционных материалов (сталь,
+// дерево) он поднят выше физического: модуль E здесь на пять порядков меньше
+// настоящего, и при честных 0.002 предел sigma = E*yieldS даёт длину самонесущего
+// пролёта всего 3.5 м — рамная конструкция складывается под собственным весом.
+// У кузовного металла значение оставлено физическим, поэтому машина по-прежнему мнётся. rho — настоящая плотность, т/м^3. E — модуль упругости в единицах симуляции:
 // податливость балки comp = 1/(E * размер вокселя), поэтому жёсткость масштабируется
 // с сеткой правильно, а скорость звука sqrt(E/rho) от детализации не зависит.
 // brk — предельная деформация на РАСТЯЖЕНИЕ; сжатие держится в BRK_COMP раз лучше.
 // voro — множитель порога разрыва для балок через границу ячеек Вороного (1 = не применяется)
 const MATS = {
   metal:  { color:[0.82,0.18,0.16], E:2.7e5, yieldS:0.002, plastic:0.25, brk:0.55, rho:2.70, voro:1 },
-  steel:  { color:[0.60,0.64,0.70], E:8.2e5, yieldS:0.002, plastic:0.15, brk:0.70, rho:7.85, voro:1 },
+  steel:  { color:[0.60,0.64,0.70], E:8.2e5, yieldS:0.015, plastic:0.15, brk:0.70, rho:7.85, voro:1 },
   glass:  { color:[0.70,0.88,1.00], E:6.9e5, yieldS:9,     plastic:0,    brk:0.002, rho:2.50, voro:0.2 },
   brick:  { color:[0.80,0.38,0.22], E:2.3e5, yieldS:9,     plastic:0,    brk:0.0024,rho:1.80, voro:1 },   // швы задаёт раствор
   mortar: { color:[0.72,0.66,0.58], E:1.6e5, yieldS:9,     plastic:0,    brk:0.0016,rho:1.90, voro:1 },
   rubber: { color:[0.13,0.13,0.15], E:3.4e4, yieldS:9,     plastic:0,    brk:1.5,  rho:1.10, voro:1 },
   jelly:  { color:[0.35,0.90,0.55], E:2.1e3, yieldS:9,     plastic:0,    brk:2.5,  rho:1.05, voro:1 },
-  wood:   { color:[0.60,0.42,0.22], E:5.4e4, yieldS:0.004, plastic:0.05, brk:0.09, rho:0.60, voro:0.6 },
+  wood:   { color:[0.60,0.42,0.22], E:5.4e4, yieldS:0.02,  plastic:0.05, brk:0.09, rho:0.60, voro:0.6 },
   concrete:{color:[0.52,0.53,0.55], E:3.3e5, yieldS:9,     plastic:0,    brk:0.002, rho:2.40, voro:0.25 },
   anchor: { color:[0.30,0.32,0.36], E:4.9e5, yieldS:9,     plastic:0,    brk:9,    rho:7.85, voro:1 },
 };
@@ -130,7 +134,7 @@ const MATS = {
 const MAT_VIEW = { metal:[0.95,0.25,0.25], steel:[0.75,0.78,0.85], glass:[0.35,0.75,1.0], brick:[1.0,0.55,0.2], mortar:[0.95,0.9,0.6], rubber:[0.25,0.25,0.3], jelly:[0.3,0.95,0.4], wood:[0.8,0.55,0.25], concrete:[0.6,0.6,0.65], anchor:[0.9,0.3,0.9] };
 const MAT_NAMES_RU = { metal:'металл (пластичный)', steel:'сталь', glass:'стекло (хрупкое)', brick:'кирпич (хрупкий)', mortar:'раствор (хрупкий)', rubber:'резина', jelly:'желе', wood:'дерево', concrete:'бетон (хрупкий)', anchor:'опора (статична)' };
 const MAT_LIST = Object.values(MATS), MAT_KEYS = Object.keys(MATS);
-const CAR_KG = 1300, CAR_CRUSH = 1.3; // паспортная масса машины и путь сминания, м
+const CAR_KG = 1300, CAR_CRUSH = 1.3, CAR_SOFT = 25; // масса машины, путь сминания (м) и податливость полого кузова
 const OFFS = [];
 for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++)
   if (dx>0 || (dx===0 && dy>0) || (dx===0 && dy===0 && dz>0)) OFFS.push([dx,dy,dz]);
@@ -463,8 +467,11 @@ const K_ACT_NODES = COMMON + /* wgsl */`
 @compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x; if (i >= P.nNodes) { return; }
   let n = nodes[i]; if (n.info.x == 0u) { return; }
-  if (P.actMode == 1u) { // запуск объекта
-    if (n.info.y == 0u && n.info.w == P.actObj) { nodes[i].vel = vec4f(P.actVel.xyz, n.vel.w); }
+  if (P.actMode == 1u) { // запуск объекта; actVel.w > 0 — снять закрепление, вернув обратную массу
+    if (n.info.y == 0u && n.info.w == P.actObj) {
+      nodes[i].vel = vec4f(P.actVel.xyz, n.vel.w);
+      if (P.actVel.w > 0.0) { nodes[i].pos = vec4f(n.pos.xyz, P.actVel.w); }
+    }
   } else if (P.actMode == 2u) { // взрыв
     let R = P.actCenter.w; let d = n.pos.xyz - P.actCenter.xyz; let d2 = dot(d, d);
     if (d2 > R * R) { return; }
@@ -699,7 +706,7 @@ class Builder {
     this.k = k; this.S = 1 / k;
     this.nodes = []; // временно: [x,y,z,invMass,radius,mat,obj]
     this.colors = []; this.grid = []; // координаты узла в мелкой сетке (для таблицы 26 соседей)
-    this.maps = []; this.smooth = []; this.massKg = []; this.objCount = 0; this.pending = [];
+    this.maps = []; this.smooth = []; this.massKg = []; this.soft = []; this.objCount = 0; this.pending = [];
     this.bI = []; this.bJ = []; this.bColor = []; this.bDir = [];
     this.voro = P.voro; this.fragSize = P.fragSize; // разбиение Вороного: включено ли и шаг семян (в базовых вокселях)
     this.cell = null; this.cellCount = 0;
@@ -742,12 +749,15 @@ class Builder {
     }
   }
   // opts.smooth — объекту строится FFD-оболочка (гладкий кузов, привязанный к решётке)
+  // opts.soft — во сколько раз конструкция податливее сплошного тела из того же
+  // материала. Задаётся явно, иначе жёсткость кузова считалась бы из нормировки массы
+  // и менялась бы при любой замене материала детали.
   // opts.massKg — паспортная масса объекта. Воксельная геометрия при 20 см на воксель
   // грубая: настоящая машина внутри почти пустая, и сплошная оболочка всё равно вышла бы
   // в десятки тонн. Поэтому массы узлов такого объекта масштабируются к паспортной,
   // а податливость его балок — на тот же множитель. Для тонкостенной конструкции это
   // и есть верная зависимость: масса и жёсткость падают вместе, частота не меняется.
-  newObject(opts = {}) { if (this.objCount >= MAX_OBJ) throw new Error('слишком много объектов'); this.maps.push(new Map()); this.smooth.push(!!opts.smooth && !!P.ffd); this.massKg.push(opts.massKg || 0); return this.objCount++; }
+  newObject(opts = {}) { if (this.objCount >= MAX_OBJ) throw new Error('слишком много объектов'); this.maps.push(new Map()); this.smooth.push(!!opts.smooth && !!P.ffd); this.massKg.push(opts.massKg || 0); this.soft.push(opts.soft || 0); return this.objCount++; }
   // базовый воксель (в координатах грубой сетки) -> k^3 мелких
   addVoxel(obj, ix, iy, iz, origin, matName, jitter = 0.06, fixed = false) {
     const m = MATS[matName], k = this.k, S = this.S, map = this.maps[obj];
@@ -991,7 +1001,7 @@ class Builder {
       const o = dst * 8;
       bu[o] = i; bu[o + 1] = j; bf[o + 2] = len; bf[o + 3] = len;
       // податливость балки: comp = 1/(E * шаг сетки), по мягчайшему из двух материалов
-      bf[o + 4] = 1 / (Math.min(mi.E, mj.E) * this.S * lam[ni[6]]);
+      bf[o + 4] = (1 / (Math.min(mi.E, mj.E) * this.S)) * (this.soft[ni[6]] || 1 / lam[ni[6]]);
       bf[o + 5] = weak.yieldS; bf[o + 6] = weak.plastic; bf[o + 7] = weak.brk * k;
       if (cell[i] !== cell[j] && weak.voro < 1) { bf[o + 7] *= weak.voro; nbWeak++; }
       beamAlive[dst] = 1;
@@ -1005,7 +1015,9 @@ class Builder {
     const ffd = this.buildFFD();
     // массы объектов в килограммах — для панели статистики
     const massKgOut = new Float64Array(this.objCount);
-    for (let i = 0; i < n; i++) { const v = this.nodes[i]; if (v[3] > 0) massKgOut[v[6]] += KG_PER_SIM / v[3]; }
+    // закреплённые узлы (обратная масса 0) считаем по плотности материала — масса у них есть,
+    // просто они неподвижны
+    for (let i = 0; i < n; i++) { const v = this.nodes[i]; massKgOut[v[6]] += KG_PER_SIM * (v[3] > 0 ? 1 / v[3] : v[5].rho * this.S ** 3); }
     const cent0 = new Float32Array(MAX_OBJ * 4), cnt = new Float32Array(MAX_OBJ);
     for (let i = 0; i < n; i++) { const o = this.nodes[i][6]; if (o >= MAX_OBJ) continue; cent0[o * 4] += pos0[i * 4]; cent0[o * 4 + 1] += pos0[i * 4 + 1]; cent0[o * 4 + 2] += pos0[i * 4 + 2]; cnt[o]++; }
     for (let o = 0; o < MAX_OBJ; o++) if (cnt[o]) { cent0[o * 4] /= cnt[o]; cent0[o * 4 + 1] /= cnt[o]; cent0[o * 4 + 2] /= cnt[o]; }
@@ -1024,20 +1036,22 @@ function addCar(B, obj, x0, dir, gy, z0 = 0) {
     const rail = y === 0 && (z < 2 || z > W - 3);
     if (!rail && x > 0 && x < L - 1 && y > 0 && y < H - 1 && z > 0 && z < W - 1) continue;
     if ((x === 4 || x === 5 || x === L - 6 || x === L - 5) && y < 2 && (z < 2 || z > W - 3)) continue;
-    B.addVoxel(obj, X(x), y, z, o, rail ? 'steel' : 'metal');
+    // лонжероны — та же кузовная сталь, только сплошной полосой: у конструкционной
+    // стали предел текучести на порядок выше, и машина переставала бы сминаться
+    B.addVoxel(obj, X(x), y, z, o, 'metal');
   }
   for (let x = 6; x < 16; x++) for (let y = H; y < H + 4; y++) for (let z = 1; z < W - 1; z++) {
     const edge = (x === 6 || x === 15 || z === 1 || z === W - 2), top = (y === H + 3);
     if (!edge && !top) continue;
     let m = 'metal';
     if (edge && !top && y >= H + 1 && y <= H + 2) m = 'glass';
-    if (edge && !top && (x === 6 || x === 15) && (z === 1 || z === W - 2)) m = 'steel';
+    if (edge && !top && (x === 6 || x === 15) && (z === 1 || z === W - 2)) m = 'metal'; // стойки крыши
     B.addVoxel(obj, X(x), y, z, o, m);
   }
   for (const cx of [5, 17]) for (const cz of [-2, W])
     for (let x = -3; x <= 3; x++) for (let y = -3; y <= 3; y++) for (let z = 0; z < 2; z++) {
       const r = Math.hypot(x, y); if (r > 3.2) continue;
-      B.addVoxel(obj, X(cx + x), y, cz + z, o, r < 1.2 ? 'steel' : 'rubber');
+      B.addVoxel(obj, X(cx + x), y, cz + z, o, r < 1.2 ? 'metal' : 'rubber');
     }
   B.finalize();
 }
@@ -1080,6 +1094,15 @@ function addWallWithPosts(B, obj, origin, WX, WY, WZ, wallMat, postMat) {
     B.addVoxel(obj, x, y, z0 + z, origin, postMat, 0.04, fixed);
   B.finalize();
 }
+// Сечение поперечного элемента подбирается так, чтобы он не гнулся под собственным
+// весом. Для балки квадратного сечения a×a пролётом L: наибольшее напряжение изгиба
+// 0.75*rho*g*L²/a, прогиб середины 0.15625*rho*g*L⁴/(E*a²). Требуем двукратный запас
+// по напряжению относительно предела sigma = E*min(yieldS, brk) и прогиб не больше L/50.
+function memberSize(matKey, L, g) {
+  const m = MATS[matKey], rg = m.rho * g, sig = m.E * Math.min(m.yieldS, m.brk);
+  const need = Math.max(1.5 * rg * L * L / sig, Math.sqrt(7.81 * rg * L * L * L / m.E));
+  return { need, a: Math.max(2, Math.min(8, Math.ceil(need))) };
+}
 // Прямой элемент квадратного сечения r×r от a к b: шагаем по самой длинной оси,
 // поэтому диагональ получается сплошной без дыр.
 function addStrut(B, obj, origin, a, b, mat, r = 2) {
@@ -1097,15 +1120,15 @@ function addBox(B, obj, origin, sx, sy, sz, mat, jitter = 0.05, fixed = false) {
 }
 const SCENES = {
   car: { name: 'Машина в стену', launchLabel: 'Запустить машину', build(B, gy) {
-    const car = B.newObject({ smooth: true, massKg: CAR_KG }); addCar(B, car, 0, 1, gy);
+    const car = B.newObject({ smooth: true, massKg: CAR_KG, soft: CAR_SOFT }); addCar(B, car, 0, 1, gy);
     const WX = P.wallT, hint = wallThicknessHint(P.wallMat, 30);
     const wall = B.newObject(); addWallWithPosts(B, wall, [36, gy, -10], WX, 18, 30, P.wallMat, P.postMat);
     return { center: [20, 6, 5], dist: 70, launch: () => [{ mode: 1, obj: car, vel: [P.carSpeed, 0, 0] }],
       info: m => `машина: ${(m[car] / 1000).toFixed(1)} т<br>стена: ${(WX * M_PER_UNIT * 100).toFixed(0)} см, ${(m[wall] / 1000).toFixed(1)} т (${(m[wall] / m[car]).toFixed(0)} машин)<br>устоит от ${(hint * M_PER_UNIT * 100).toFixed(0)} см<br>` };
   } },
   twocars: { name: 'Лобовое: две машины', launchLabel: 'Разогнать обе', build(B, gy) {
-    const a = B.newObject({ smooth: true, massKg: CAR_KG }); addCar(B, a, -30, 1, gy);
-    const b = B.newObject({ smooth: true, massKg: CAR_KG }); addCar(B, b, 30, -1, gy);
+    const a = B.newObject({ smooth: true, massKg: CAR_KG, soft: CAR_SOFT }); addCar(B, a, -30, 1, gy);
+    const b = B.newObject({ smooth: true, massKg: CAR_KG, soft: CAR_SOFT }); addCar(B, b, 30, -1, gy);
     return { center: [11, 6, 5], dist: 75, launch: () => [{ mode: 1, obj: a, vel: [P.carSpeed, 0, 0] }, { mode: 1, obj: b, vel: [-P.carSpeed, 0, 0] }] };
   } },
   materials: { name: 'Падение: сравнение материалов', build(B, gy) {
@@ -1138,39 +1161,49 @@ const SCENES = {
     B.finalize();
     const load = B.newObject(); addBox(B, load, [-3, 15 + gy, 3], 6, 4, 4, 'concrete');
     const ramp = B.newObject(); addBox(B, ramp, [-66, 13 + gy, -9], 44, 2, 18, 'anchor', 0.03, true); // статичная эстакада
-    const truck = B.newObject({ smooth: true, massKg: CAR_KG }); addCar(B, truck, -60, 1, 15 + gy, -5);
+    const truck = B.newObject({ smooth: true, massKg: CAR_KG, soft: CAR_SOFT }); addCar(B, truck, -60, 1, 15 + gy, -5);
     return { center: [0, 10, 0], dist: 80, launchLabel: 'Пустить машину по мосту', launch: () => [{ mode: 1, obj: truck, vel: [P.carSpeed, 0, 0] }] };
   } },
   // Каркасная башня: четыре угловые стойки, горизонтальные пояса и раскосы крест-накрест
   // на каждой грани. Материал стоек и поперечных элементов выбирается отдельно —
-  // видно, что несёт вес, а что держит форму: на мягких раскосах башня складывается
-  // вбок даже при стальных стойках, а на хрупких сначала осыпаются связи.
+  // видно, что несёт вес, а что держит форму. Сечение поперечных подбирается под
+  // пролёт (memberSize), чтобы они не провисали сами по себе; если материалу не хватает
+  // прочности, сечение упирается в предел и в панели видно требуемое против взятого.
   tower: { name: 'Каркасная башня', launchLabel: 'Пустить блок', build(B, gy) {
-    const W = 14, H = 44, o = [0, gy, 0], col = P.towerCol, br = P.towerBeam;
-    const rings = [0, 10, 20, 30, 42];
+    const W = 22, H = 60, BAYS = 3, AC = 3, o = [0, gy, 0], col = P.towerCol, br = P.towerBeam;
+    const span = W - 2 * AC;                       // пролёт между стойками
+    const ms = memberSize(br, span, P.gravity), ab = ms.a;
+    const bay = Math.floor((H - ab) / BAYS);
+    const rings = []; for (let i = 0; i <= BAYS; i++) rings.push(i * bay);
     const t = B.newObject();
-    // угловые стойки 3×3 на всю высоту; нижние два уровня закреплены как фундамент
-    for (const [cx, cz] of [[0, 0], [W - 3, 0], [0, W - 3], [W - 3, W - 3]])
-      for (let x = 0; x < 3; x++) for (let y = 0; y < H; y++) for (let z = 0; z < 3; z++)
+    // угловые стойки на всю высоту; нижние два уровня закреплены как фундамент
+    for (const [cx, cz] of [[0, 0], [W - AC, 0], [0, W - AC], [W - AC, W - AC]])
+      for (let x = 0; x < AC; x++) for (let y = 0; y < H; y++) for (let z = 0; z < AC; z++)
         B.addVoxel(t, cx + x, y, cz + z, o, col, 0.04, y < 2);
     // горизонтальные пояса по периметру
-    for (const ry of rings) for (let y = ry; y < ry + 2; y++)
+    for (const ry of rings) for (let y = ry; y < ry + ab; y++)
       for (let x = 0; x < W; x++) for (let z = 0; z < W; z++)
-        if (x < 2 || x >= W - 2 || z < 2 || z >= W - 2) B.addVoxel(t, x, y, z, o, br, 0.04, y < 2);
-    // раскосы: по два на каждую грань каждого пролёта
-    const faces = [(u, y) => [u, y, 0], (u, y) => [u, y, W - 2], (u, y) => [0, y, u], (u, y) => [W - 2, y, u]];
+        if (x < ab || x >= W - ab || z < ab || z >= W - ab) B.addVoxel(t, x, y, z, o, br, 0.04, y < 2);
+    // раскосы крест-накрест: по два на каждую грань каждого пролёта
+    const faces = [(u, y) => [u, y, 0], (u, y) => [u, y, W - ab], (u, y) => [0, y, u], (u, y) => [W - ab, y, u]];
     for (let b = 0; b + 1 < rings.length; b++) {
-      const y0 = rings[b] + 2, y1 = rings[b + 1] - 1;
+      const y0 = rings[b] + ab, y1 = rings[b + 1] - 1, u0 = AC, u1 = W - AC - ab;
       for (const f of faces) {
-        addStrut(B, t, o, f(2, y0), f(W - 4, y1), br);
-        addStrut(B, t, o, f(W - 4, y0), f(2, y1), br);
+        addStrut(B, t, o, f(u0, y0), f(u1, y1), br, ab);
+        addStrut(B, t, o, f(u1, y0), f(u0, y1), br, ab);
       }
     }
     B.finalize();
+    // Блок висит закреплённым, пока его не пустят: иначе он просто падал бы на землю
+    // и разбивался ещё до запуска. Обратная масса возвращается кернелом при старте.
     const block = B.newObject();
-    addBox(B, block, [-42, gy + 22, 2], 10, 10, 10, 'concrete');
-    return { center: [W / 2, 18, W / 2], dist: 95, launch: () => [{ mode: 1, obj: block, vel: [P.carSpeed, 0, 0] }],
-      info: m => `башня: ${(m[0] / 1000).toFixed(1)} т<br>блок: ${(m[1] / 1000).toFixed(1)} т<br>` };
+    addBox(B, block, [-46, gy + 28, W / 2 - 5], 10, 10, 10, 'concrete', 0.05, true);
+    const blockInvM = 1 / (MATS.concrete.rho * B.S ** 3);
+    return { center: [W / 2, 24, W / 2], dist: 120,
+      launch: () => [{ mode: 1, obj: block, vel: [P.carSpeed, 0, 0], strength: blockInvM }],
+      info: m => `башня: ${(m[0] / 1000).toFixed(1)} т, ${(H * M_PER_UNIT).toFixed(1)} м<br>` +
+        `пролёт ${(span * M_PER_UNIT).toFixed(1)} м, сечение ${(ab * M_PER_UNIT * 100).toFixed(0)} см` +
+        (ms.need > ab + 0.01 ? ` (нужно ${(ms.need * M_PER_UNIT * 100).toFixed(0)})` : '') + `<br>блок: ${(m[1] / 1000).toFixed(1)} т<br>` };
   } },
   jenga: { name: 'Дженга: отдельные блоки', build(B, gy) {
     // 14 уровней по 3 бруска 12×2×4, уровни чередуют направление — проверка контактов между объектами
