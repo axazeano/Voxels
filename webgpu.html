@@ -100,23 +100,33 @@
 // ============================================================
 const MAX_BALLS = 16, MAX_OBJ = 128, MAX_ITER = 16, K_SLOTS = 8, HASH_BITS = 18, HASH_SIZE = 1 << HASH_BITS, WG = 128;
 const STRESS_SCALE = 16384, BALL_FIX = 65536;
-// voro — множитель порога разрыва для балок, пересекающих границу ячеек Вороного (1 = разбиение не применяется)
+// Физический масштаб: 1 базовый воксель = 20 см, поэтому машина длиной 22 вокселя
+// имеет привычные 4.4 м. Масса узла = rho * (размер вокселя)^3, то есть не зависит
+// от детализации: мельче сетка — легче узлы, суммарная масса тела та же.
+// Единица массы симуляции = 1 ед^3 материала плотностью 1 т/м^3 = 8 кг.
+const M_PER_UNIT = 0.2, KG_PER_SIM = 1000 * M_PER_UNIT ** 3;
+// yieldS — предел текучести, делённый на модуль (безразмерная деформация начала
+// пластики), поэтому от детализации не зависит. rho — настоящая плотность, т/м^3. E — модуль упругости в единицах симуляции:
+// податливость балки comp = 1/(E * размер вокселя), поэтому жёсткость масштабируется
+// с сеткой правильно, а скорость звука sqrt(E/rho) от детализации не зависит.
+// voro — множитель порога разрыва для балок через границу ячеек Вороного (1 = не применяется)
 const MATS = {
-  metal:  { color:[0.82,0.18,0.16], comp:2.5e-6, yieldS:0.02,  plastic:0.15, brk:0.55, dens:1.0, voro:1 },
-  steel:  { color:[0.60,0.64,0.70], comp:1.5e-6, yieldS:0.03,  plastic:0.10, brk:0.70, dens:1.6, voro:1 },
-  glass:  { color:[0.70,0.88,1.00], comp:1.5e-6, yieldS:9,     plastic:0,    brk:0.02, dens:0.6, voro:0.2 },
-  brick:  { color:[0.80,0.38,0.22], comp:1.5e-6, yieldS:9,     plastic:0,    brk:0.025,dens:1.3, voro:1 },   // швы задаёт раствор
-  mortar: { color:[0.72,0.66,0.58], comp:2.5e-6, yieldS:9,     plastic:0,    brk:0.015,dens:1.2, voro:1 },
-  rubber: { color:[0.13,0.13,0.15], comp:1.0e-5, yieldS:9,     plastic:0,    brk:1.5,  dens:0.8, voro:1 },
-  jelly:  { color:[0.35,0.90,0.55], comp:2.5e-4, yieldS:9,     plastic:0,    brk:2.5,  dens:0.5, voro:1 },
-  wood:   { color:[0.60,0.42,0.22], comp:4.0e-6, yieldS:0.05,  plastic:0.05, brk:0.09, dens:0.7, voro:0.6 },
-  concrete:{color:[0.52,0.53,0.55], comp:1.2e-6, yieldS:9,     plastic:0,    brk:0.02, dens:1.5, voro:0.25 },
-  anchor: { color:[0.30,0.32,0.36], comp:1.0e-6, yieldS:9,     plastic:0,    brk:9,    dens:4.0, voro:1 },
+  metal:  { color:[0.82,0.18,0.16], E:2.7e5, yieldS:0.002, plastic:0.25, brk:0.55, rho:2.70, voro:1 },
+  steel:  { color:[0.60,0.64,0.70], E:8.2e5, yieldS:0.002, plastic:0.15, brk:0.70, rho:7.85, voro:1 },
+  glass:  { color:[0.70,0.88,1.00], E:6.9e5, yieldS:9,     plastic:0,    brk:0.02, rho:2.50, voro:0.2 },
+  brick:  { color:[0.80,0.38,0.22], E:2.3e5, yieldS:9,     plastic:0,    brk:0.025,rho:1.80, voro:1 },   // швы задаёт раствор
+  mortar: { color:[0.72,0.66,0.58], E:1.6e5, yieldS:9,     plastic:0,    brk:0.015,rho:1.90, voro:1 },
+  rubber: { color:[0.13,0.13,0.15], E:3.4e4, yieldS:9,     plastic:0,    brk:1.5,  rho:1.10, voro:1 },
+  jelly:  { color:[0.35,0.90,0.55], E:2.1e3, yieldS:9,     plastic:0,    brk:2.5,  rho:1.05, voro:1 },
+  wood:   { color:[0.60,0.42,0.22], E:5.4e4, yieldS:0.004, plastic:0.05, brk:0.09, rho:0.60, voro:0.6 },
+  concrete:{color:[0.52,0.53,0.55], E:3.3e5, yieldS:9,     plastic:0,    brk:0.02, rho:2.40, voro:0.25 },
+  anchor: { color:[0.30,0.32,0.36], E:4.9e5, yieldS:9,     plastic:0,    brk:9,    rho:7.85, voro:1 },
 };
 // заметно различающаяся палитра для режима «Материалы»
 const MAT_VIEW = { metal:[0.95,0.25,0.25], steel:[0.75,0.78,0.85], glass:[0.35,0.75,1.0], brick:[1.0,0.55,0.2], mortar:[0.95,0.9,0.6], rubber:[0.25,0.25,0.3], jelly:[0.3,0.95,0.4], wood:[0.8,0.55,0.25], concrete:[0.6,0.6,0.65], anchor:[0.9,0.3,0.9] };
 const MAT_NAMES_RU = { metal:'металл (пластичный)', steel:'сталь', glass:'стекло (хрупкое)', brick:'кирпич (хрупкий)', mortar:'раствор (хрупкий)', rubber:'резина', jelly:'желе', wood:'дерево', concrete:'бетон (хрупкий)', anchor:'опора (статична)' };
 const MAT_LIST = Object.values(MATS), MAT_KEYS = Object.keys(MATS);
+const CAR_KG = 1300; // паспортная масса машины
 const OFFS = [];
 for (let dx=-1; dx<=1; dx++) for (let dy=-1; dy<=1; dy++) for (let dz=-1; dz<=1; dz++)
   if (dx>0 || (dx===0 && dy>0) || (dx===0 && dy===0 && dz>0)) OFFS.push([dx,dy,dz]);
@@ -680,7 +690,7 @@ class Builder {
     this.k = k; this.S = 1 / k;
     this.nodes = []; // временно: [x,y,z,invMass,radius,mat,obj]
     this.colors = []; this.grid = []; // координаты узла в мелкой сетке (для таблицы 26 соседей)
-    this.maps = []; this.smooth = []; this.objCount = 0; this.pending = [];
+    this.maps = []; this.smooth = []; this.massKg = []; this.objCount = 0; this.pending = [];
     this.bI = []; this.bJ = []; this.bColor = []; this.bDir = [];
     this.voro = P.voro; this.fragSize = P.fragSize; // разбиение Вороного: включено ли и шаг семян (в базовых вокселях)
     this.cell = null; this.cellCount = 0;
@@ -723,7 +733,12 @@ class Builder {
     }
   }
   // opts.smooth — объекту строится FFD-оболочка (гладкий кузов, привязанный к решётке)
-  newObject(opts = {}) { if (this.objCount >= MAX_OBJ) throw new Error('слишком много объектов'); this.maps.push(new Map()); this.smooth.push(!!opts.smooth && !!P.ffd); return this.objCount++; }
+  // opts.massKg — паспортная масса объекта. Воксельная геометрия при 20 см на воксель
+  // грубая: настоящая машина внутри почти пустая, и сплошная оболочка всё равно вышла бы
+  // в десятки тонн. Поэтому массы узлов такого объекта масштабируются к паспортной,
+  // а податливость его балок — на тот же множитель. Для тонкостенной конструкции это
+  // и есть верная зависимость: масса и жёсткость падают вместе, частота не меняется.
+  newObject(opts = {}) { if (this.objCount >= MAX_OBJ) throw new Error('слишком много объектов'); this.maps.push(new Map()); this.smooth.push(!!opts.smooth && !!P.ffd); this.massKg.push(opts.massKg || 0); return this.objCount++; }
   // базовый воксель (в координатах грубой сетки) -> k^3 мелких
   addVoxel(obj, ix, iy, iz, origin, matName, jitter = 0.06, fixed = false) {
     const m = MATS[matName], k = this.k, S = this.S, map = this.maps[obj];
@@ -733,7 +748,7 @@ class Builder {
       if (map.has(key)) continue;
       const id = this.nodes.length;
       const jit = (Math.random() * 2 - 1) * jitter;
-      this.nodes.push([origin[0] + (gx + 0.5) * S, origin[1] + (gy + 0.5) * S, origin[2] + (gz + 0.5) * S, fixed ? 0 : 1 / m.dens, 0.45 * S, m, obj]);
+      this.nodes.push([origin[0] + (gx + 0.5) * S, origin[1] + (gy + 0.5) * S, origin[2] + (gz + 0.5) * S, fixed ? 0 : 1 / (m.rho * S * S * S), 0.45 * S, m, obj]);
       this.colors.push([Math.min(1, Math.max(0, m.color[0] + jit)), Math.min(1, Math.max(0, m.color[1] + jit)), Math.min(1, Math.max(0, m.color[2] + jit))]);
       map.set(key, id); this.pending.push([id, gx, gy, gz, obj]); this.grid.push([gx, gy, gz]);
     }
@@ -927,6 +942,17 @@ class Builder {
   }
   build() {
     const n = this.nodes.length, nTotal = n + MAX_BALLS, nb = this.bI.length, k = this.k;
+    // приведение к паспортной массе: lam < 1 означает, что тело полое и во столько же
+    // раз слабее сплошного — податливость его балок делится на тот же множитель
+    const lam = new Float64Array(this.objCount).fill(1);
+    {
+      const sum = new Float64Array(this.objCount);
+      for (let i = 0; i < n; i++) { const v = this.nodes[i]; if (v[3] > 0) sum[v[6]] += 1 / v[3]; }
+      for (let o = 0; o < this.objCount; o++) if (this.massKg[o] && sum[o] > 0) {
+        lam[o] = this.massKg[o] / KG_PER_SIM / sum[o];
+        for (let i = 0; i < n; i++) { const v = this.nodes[i]; if (v[6] === o && v[3] > 0) v[3] /= lam[o]; }
+      }
+    }
     this.assignCells(); const cell = this.cell; let nbWeak = 0;
     const nodeBuf = new ArrayBuffer(nTotal * 64), nf = new Float32Array(nodeBuf), nu = new Uint32Array(nodeBuf);
     const colors = new Float32Array(nTotal * 4);
@@ -955,7 +981,9 @@ class Builder {
       const len = Math.hypot(nj[0] - ni[0], nj[1] - ni[1], nj[2] - ni[2]);
       const o = dst * 8;
       bu[o] = i; bu[o + 1] = j; bf[o + 2] = len; bf[o + 3] = len;
-      bf[o + 4] = Math.max(mi.comp, mj.comp); bf[o + 5] = weak.yieldS * k; bf[o + 6] = weak.plastic; bf[o + 7] = weak.brk * k;
+      // податливость балки: comp = 1/(E * шаг сетки), по мягчайшему из двух материалов
+      bf[o + 4] = 1 / (Math.min(mi.E, mj.E) * this.S * lam[ni[6]]);
+      bf[o + 5] = weak.yieldS; bf[o + 6] = weak.plastic; bf[o + 7] = weak.brk * k;
       if (cell[i] !== cell[j] && weak.voro < 1) { bf[o + 7] *= weak.voro; nbWeak++; }
       beamAlive[dst] = 1;
       const d = this.bDir[b];
@@ -966,23 +994,28 @@ class Builder {
     const nb26 = this.buildNb26(nTotal);
     const { cornerIdx, corners } = this.clipCorners(nb26, nTotal);
     const ffd = this.buildFFD();
+    // массы объектов в килограммах — для панели статистики
+    const massKgOut = new Float64Array(this.objCount);
+    for (let i = 0; i < n; i++) { const v = this.nodes[i]; if (v[3] > 0) massKgOut[v[6]] += KG_PER_SIM / v[3]; }
     const cent0 = new Float32Array(MAX_OBJ * 4), cnt = new Float32Array(MAX_OBJ);
     for (let i = 0; i < n; i++) { const o = this.nodes[i][6]; if (o >= MAX_OBJ) continue; cent0[o * 4] += pos0[i * 4]; cent0[o * 4 + 1] += pos0[i * 4 + 1]; cent0[o * 4 + 2] += pos0[i * 4 + 2]; cnt[o]++; }
     for (let o = 0; o < MAX_OBJ; o++) if (cnt[o]) { cent0[o * 4] /= cnt[o]; cent0[o * 4 + 1] /= cnt[o]; cent0[o * 4 + 2] /= cnt[o]; }
-    return { n, nTotal, nb, nodeBuf, colors, nbArr, nb26, cornerIdx, corners, beamBuf, beamAlive, ranges, S: this.S, pos0, cent0, cells: this.cellCount - 1, nbWeak, ...ffd };
+    return { n, nTotal, nb, nodeBuf, colors, nbArr, nb26, cornerIdx, corners, beamBuf, beamAlive, ranges, S: this.S, pos0, cent0, cells: this.cellCount - 1, nbWeak, massKgOut, ...ffd };
   }
 }
 // Все сцены строятся в «базовых» вокселях; детализация дробит каждый на k^3.
 // gy — сдвиг, при котором нижний субвоксель касается земли.
+// Кузов полый: только оболочка и лонжероны по днищу. Сплошная решётка при 20 см на
+// воксель дала бы 40 с лишним тонн металла, поэтому объект строится с паспортной
+// массой (см. newObject), а геометрия задаёт лишь распределение массы и жёсткость.
 function addCar(B, obj, x0, dir, gy, z0 = 0) {
   const L = 22, W = 10, H = 4, o = [x0, 3 + gy, z0];
   const X = x => dir > 0 ? x : L - 1 - x; // зеркало по x
   for (let x = 0; x < L; x++) for (let y = 0; y < H; y++) for (let z = 0; z < W; z++) {
-    let m = 'metal';
-    if (x === 0 || x === L - 1) m = 'steel';
-    if (y === 0 && (x < 3 || x > L - 4)) m = 'steel';
+    const rail = y === 0 && (z < 2 || z > W - 3);
+    if (!rail && x > 0 && x < L - 1 && y > 0 && y < H - 1 && z > 0 && z < W - 1) continue;
     if ((x === 4 || x === 5 || x === L - 6 || x === L - 5) && y < 2 && (z < 2 || z > W - 3)) continue;
-    B.addVoxel(obj, X(x), y, z, o, m);
+    B.addVoxel(obj, X(x), y, z, o, rail ? 'steel' : 'metal');
   }
   for (let x = 6; x < 16; x++) for (let y = H; y < H + 4; y++) for (let z = 1; z < W - 1; z++) {
     const edge = (x === 6 || x === 15 || z === 1 || z === W - 2), top = (y === H + 3);
@@ -1012,6 +1045,19 @@ function addBrickWall(B, obj, origin, WX, WY, WZ, opts = {}) {
   }
   B.finalize();
 }
+// Толщина стены подбирается под удар машины. Сила при сминании на полметра равна
+// E_кин / 0.5 м; сила, опрокидывающая стену через нижнее ребро при упоре бампера на
+// высоте 0.5 м, равна rho * g * H * L * t^2 / (2h). Приравнивая, получаем
+// t = sqrt(2h * F / (rho * g * H * L)): тоньше — валится, толще — стоит, и чем плотнее
+// материал, тем меньше нужная толщина. Считается целиком в единицах симуляции,
+// поэтому не зависит от того, как соотносятся её секунда и метр с настоящими.
+function wallThickness(matKey, WY, WZ) {
+  const rho = matKey === 'masonry' ? 1.85 : MATS[matKey].rho;
+  const mCar = CAR_KG / KG_PER_SIM, h = 0.5 / M_PER_UNIT, d = 0.5 / M_PER_UNIT;
+  const F = 0.5 * mCar * P.carSpeed * P.carSpeed / d;
+  const t = Math.sqrt(2 * h * F / (rho * P.gravity * WY * WZ));
+  return Math.max(1, Math.min(6, Math.round(t)));
+}
 // Стена с боковыми опорами. Опоры примыкают к торцам стены и шире её на воксель
 // с каждой стороны; они в том же объекте, поэтому finalize связывает их со стеной
 // балками — опоры действительно держат стену, а не просто стоят рядом.
@@ -1030,13 +1076,15 @@ function addBox(B, obj, origin, sx, sy, sz, mat, jitter = 0.05, fixed = false) {
 }
 const SCENES = {
   car: { name: 'Машина в стену', launchLabel: 'Запустить машину', build(B, gy) {
-    const car = B.newObject({ smooth: true }); addCar(B, car, 0, 1, gy);
-    const wall = B.newObject(); addWallWithPosts(B, wall, [36, gy, -10], 2, 18, 30, P.wallMat, P.postMat);
-    return { center: [20, 6, 5], dist: 70, launch: () => [{ mode: 1, obj: car, vel: [P.carSpeed, 0, 0] }] };
+    const car = B.newObject({ smooth: true, massKg: CAR_KG }); addCar(B, car, 0, 1, gy);
+    const WX = wallThickness(P.wallMat, 18, 30);
+    const wall = B.newObject(); addWallWithPosts(B, wall, [36, gy, -10], WX, 18, 30, P.wallMat, P.postMat);
+    return { center: [20, 6, 5], dist: 70, launch: () => [{ mode: 1, obj: car, vel: [P.carSpeed, 0, 0] }],
+      info: m => `машина: ${(m[car] / 1000).toFixed(1)} т<br>стена: ${(WX * M_PER_UNIT * 100).toFixed(0)} см, ${(m[wall] / 1000).toFixed(1)} т (${(m[wall] / m[car]).toFixed(0)} машин)<br>` };
   } },
   twocars: { name: 'Лобовое: две машины', launchLabel: 'Разогнать обе', build(B, gy) {
-    const a = B.newObject({ smooth: true }); addCar(B, a, -30, 1, gy);
-    const b = B.newObject({ smooth: true }); addCar(B, b, 30, -1, gy);
+    const a = B.newObject({ smooth: true, massKg: CAR_KG }); addCar(B, a, -30, 1, gy);
+    const b = B.newObject({ smooth: true, massKg: CAR_KG }); addCar(B, b, 30, -1, gy);
     return { center: [11, 6, 5], dist: 75, launch: () => [{ mode: 1, obj: a, vel: [P.carSpeed, 0, 0] }, { mode: 1, obj: b, vel: [-P.carSpeed, 0, 0] }] };
   } },
   materials: { name: 'Падение: сравнение материалов', build(B, gy) {
@@ -1069,7 +1117,7 @@ const SCENES = {
     B.finalize();
     const load = B.newObject(); addBox(B, load, [-3, 15 + gy, 3], 6, 4, 4, 'concrete');
     const ramp = B.newObject(); addBox(B, ramp, [-66, 13 + gy, -9], 44, 2, 18, 'anchor', 0.03, true); // статичная эстакада
-    const truck = B.newObject({ smooth: true }); addCar(B, truck, -60, 1, 15 + gy, -5);
+    const truck = B.newObject({ smooth: true, massKg: CAR_KG }); addCar(B, truck, -60, 1, 15 + gy, -5);
     return { center: [0, 10, 0], dist: 80, launchLabel: 'Пустить машину по мосту', launch: () => [{ mode: 1, obj: truck, vel: [P.carSpeed, 0, 0] }] };
   } },
   jenga: { name: 'Дженга: отдельные блоки', build(B, gy) {
@@ -1415,7 +1463,7 @@ function tick() {
   if (pickCopied) { const req = pickRequest; pickRequest = null; const mine = sim;
     B.pickStaging.mapAsync(GPUMapMode.READ).then(() => { if (sim !== mine) return; const f = new Float32Array(B.pickStaging.getMappedRange()); const u = new Uint32Array(f.buffer); resolvePick(req, f, u, eye, vp); B.pickStaging.unmap(); sim.pickBusy = false; }).catch(() => {}); }
   frames++; if (now - fpsT > 500) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now;
-    ui('stats').innerHTML = `<b>${fps.toFixed(0)}</b> fps · кадр <b>${frameMs.toFixed(1)}</b> мс<br>вокселей: <b>${sim.n.toLocaleString('ru')}</b><br>балок: <b>${(sim.nb - sim.broken).toLocaleString('ru')}</b> / ${sim.nb.toLocaleString('ru')}<br>сломано: <b>${sim.broken.toLocaleString('ru')}</b><br>${sim.cells ? `ячеек Вороного: ${sim.cells}, ослаблено балок: ${sim.nbWeak.toLocaleString('ru')}<br>` : ''}${sim.ffdCount ? `FFD-треугольников: ${(sim.ffdCount / 3).toLocaleString('ru')}<br>` : ''}подшагов: ${effSubsteps()}${effSubsteps() !== P.substeps ? ' (' + P.substeps + ' × √жёсткости)' : ''}<br>итераций: ${P.iterations}${P.cheb && P.iterations > 1 ? ' + Чебышёв' : ''}<br>dispatch/кадр: ${(paused ? 2 : effSubsteps() * (P.iterations * (NCOLORS + 3 + (P.cheb && P.iterations > 1 ? 2 : 0)) + 2) + 2) + (P.skin ? 1 : 0)}`; }
+    ui('stats').innerHTML = `<b>${fps.toFixed(0)}</b> fps · кадр <b>${frameMs.toFixed(1)}</b> мс<br>вокселей: <b>${sim.n.toLocaleString('ru')}</b><br>балок: <b>${(sim.nb - sim.broken).toLocaleString('ru')}</b> / ${sim.nb.toLocaleString('ru')}<br>сломано: <b>${sim.broken.toLocaleString('ru')}</b><br>${sim.cells ? `ячеек Вороного: ${sim.cells}, ослаблено балок: ${sim.nbWeak.toLocaleString('ru')}<br>` : ''}${sim.ffdCount ? `FFD-треугольников: ${(sim.ffdCount / 3).toLocaleString('ru')}<br>` : ''}${sim.info || ''}подшагов: ${effSubsteps()}${effSubsteps() !== P.substeps ? ' (' + P.substeps + ' × √жёсткости)' : ''}<br>итераций: ${P.iterations}${P.cheb && P.iterations > 1 ? ' + Чебышёв' : ''}<br>dispatch/кадр: ${(paused ? 2 : effSubsteps() * (P.iterations * (NCOLORS + 3 + (P.cheb && P.iterations > 1 ? 2 : 0)) + 2) + 2) + (P.skin ? 1 : 0)}`; }
 }
 let lastT = performance.now(), frameMs = 16, fpsT = performance.now(), frames = 0, fps = 0, pickRequest = null;
 
@@ -1425,7 +1473,8 @@ function spawnBall(origin, dir) {
   const id = sim.n + idx; sim.ballIds[idx] = id; sim.ballCount = Math.min(MAX_BALLS, sim.ballNext);
   const f = new Float32Array(16), u = new Uint32Array(f.buffer);
   const r = 1.3, sp = P.ballSpeed;
-  f[0] = origin[0]; f[1] = origin[1]; f[2] = origin[2]; f[3] = 1 / 40;
+  const ballMass = MATS.steel.rho * 4.18879 * r * r * r; // стальной шар радиуса r
+  f[0] = origin[0]; f[1] = origin[1]; f[2] = origin[2]; f[3] = 1 / ballMass;
   f[4] = origin[0]; f[5] = origin[1]; f[6] = origin[2];
   f[8] = dir[0] * sp; f[9] = dir[1] * sp; f[10] = dir[2] * sp; f[11] = r;
   u[12] = 1; u[13] = 1; u[14] = 1; u[15] = idx;
@@ -1465,7 +1514,8 @@ async function resetScene() {
   cam.target = sceneInfo.center.slice(); if (sceneInfo.dist) cam.dist = sceneInfo.dist;
   ui('launch').style.display = sceneInfo.launch ? '' : 'none';
   ui('launch').textContent = sceneInfo.launchLabel || sc.launchLabel || 'Запустить';
-  sim.cells = data.cells; sim.nbWeak = data.nbWeak;
+  sim.cells = data.cells; sim.nbWeak = data.nbWeak; sim.massKg = data.massKgOut;
+  sim.info = sceneInfo.info ? sceneInfo.info(data.massKgOut) : '';
   msg(''); console.log(`scene: ${data.n} nodes, ${data.nb} beams, voronoi cells ${data.cells}, weakened beams ${data.nbWeak}, ffd ${data.ffdVerts} verts / ${data.ffdCount / 3} tris, build ${(performance.now() - t0).toFixed(0)} ms`);
 }
 ui('scene').addEventListener('change', resetScene);
