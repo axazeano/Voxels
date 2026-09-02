@@ -40,6 +40,11 @@
     <button id="pause">Пауза</button>
   </div>
   <div class="row"><label>Подшагов</label><input type="range" id="sub" min="4" max="20" step="1" value="10"><span class="val" id="subV">10</span></div>
+  <div class="row"><label>Итераций / подшаг</label><input type="range" id="iter" min="1" max="8" step="1" value="1"><span class="val" id="iterV">1</span></div>
+  <div class="row"><label>Ускорение Чебышёва</label><input type="checkbox" id="cheb" checked></div>
+  <div class="row"><label>ρ (спектр. радиус)</label><input type="range" id="rho" min="0.5" max="0.995" step="0.005" value="0.9"><span class="val" id="rhoV">0.90</span></div>
+  <div class="row"><label>Задержка, итераций</label><input type="range" id="chebDelay" min="0" max="8" step="1" value="2"><span class="val" id="chebDelayV">2</span></div>
+  <div class="row"><label>γ (релаксация)</label><input type="range" id="gamma" min="0.5" max="1" step="0.05" value="0.9"><span class="val" id="gammaV">0.90</span></div>
   <div class="row"><label>Жёсткость</label><input type="range" id="stiff" min="-1" max="0.4" step="0.05" value="0"><span class="val" id="stiffV">1.0</span></div>
   <div class="row"><label>Порог разрыва</label><input type="range" id="brk" min="0.3" max="3" step="0.05" value="1"><span class="val" id="brkV">1.00</span></div>
   <div class="row"><label>Пластичность</label><input type="range" id="plast" min="0" max="2" step="0.05" value="1"><span class="val" id="plastV">1.00</span></div>
@@ -91,7 +96,7 @@
 //  Рендер «гладкой» поверхности: узлы — вершины гексаэдральной решётки, угол ячейки
 //  2×2×2 — среднее по узлам ячейки, связанным живыми осевыми балками (K_SKIN).
 // ============================================================
-const MAX_BALLS = 16, MAX_OBJ = 128, K_SLOTS = 8, HASH_BITS = 18, HASH_SIZE = 1 << HASH_BITS, WG = 128;
+const MAX_BALLS = 16, MAX_OBJ = 128, MAX_ITER = 16, K_SLOTS = 8, HASH_BITS = 18, HASH_SIZE = 1 << HASH_BITS, WG = 128;
 const STRESS_SCALE = 16384, BALL_FIX = 65536;
 // voro — множитель порога разрыва для балок, пересекающих границу ячеек Вороного (1 = разбиение не применяется)
 const MATS = {
@@ -139,13 +144,42 @@ fn hashCell(c: vec3i, mask: u32) -> u32 {
 const K_INTEGRATE = COMMON + /* wgsl */`
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read_write> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read_write> posK: array<vec4f>;
+@group(0) @binding(3) var<storage, read_write> posKm1: array<vec4f>;
 @compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x; if (i >= P.nNodes) { return; }
   let n = nodes[i]; if (n.info.x == 0u) { return; }
   var v = n.vel.xyz; if (n.pos.w > 0.0) { v.y -= P.gravity * P.dt; } else { v = vec3f(0.0); }
+  let p = n.pos.xyz + v * P.dt;
   nodes[i].prev = vec4f(n.pos.xyz, 0.0);
-  nodes[i].pos = vec4f(n.pos.xyz + v * P.dt, n.pos.w);
+  nodes[i].pos = vec4f(p, n.pos.w);
   nodes[i].vel = vec4f(v, n.vel.w);
+  posK[i] = vec4f(p, 0.0); posKm1[i] = vec4f(p, 0.0);
+}`;
+// Снимок x_k в начале итерации (x_{k-1} ← x_k)
+const K_SNAP = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read_write> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read_write> posK: array<vec4f>;
+@group(0) @binding(3) var<storage, read_write> posKm1: array<vec4f>;
+@compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.nNodes) { return; }
+  posKm1[i] = posK[i]; posK[i] = vec4f(nodes[i].pos.xyz, 0.0);
+}`;
+// Ускорение Чебышёва (Wang 2015): x_{k+1} = ω(γ(x̂ − x_k) + x_k − x_{k−1}) + x_{k−1}
+// Применяется только к решению связей; контакты считаются после экстраполяции.
+const K_CHEB = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read_write> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read_write> posK: array<vec4f>;
+@group(0) @binding(3) var<storage, read_write> posKm1: array<vec4f>;
+@group(0) @binding(4) var<uniform> cheb: vec4f; // omega, gamma
+@compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.nNodes) { return; }
+  let n = nodes[i]; if (n.info.x == 0u || n.pos.w == 0.0) { return; }
+  let xh = n.pos.xyz; let xk = posK[i].xyz; let xm = posKm1[i].xyz;
+  let xn = cheb.x * (cheb.y * (xh - xk) + xk - xm) + xm;
+  nodes[i].pos = vec4f(xn, n.pos.w);
 }`;
 const K_BEAMS = COMMON + /* wgsl */`
 @group(0) @binding(0) var<uniform> P: Params;
@@ -154,7 +188,8 @@ const K_BEAMS = COMMON + /* wgsl */`
 @group(0) @binding(3) var<storage, read_write> beamAlive: array<u32>;
 @group(0) @binding(4) var<storage, read_write> stat: array<atomic<u32>>; // [2i] напряжение, [2i+1] пластичность
 @group(0) @binding(5) var<storage, read_write> counters: array<atomic<u32>>;
-@group(0) @binding(6) var<uniform> range: vec4u;
+@group(0) @binding(6) var<uniform> range: vec4u; // start, count, lastIteration, firstIteration
+@group(0) @binding(7) var<storage, read_write> lambda: array<f32>;
 @compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
   let k = g.x; if (k >= range.y) { return; }
   let b = range.x + k;
@@ -165,7 +200,9 @@ const K_BEAMS = COMMON + /* wgsl */`
   let wi = pi.w; let wj = pj.w; let w = wi + wj; if (w == 0.0) { return; }
   let d = pj.xyz - pi.xyz; let len = length(d); if (len < 1e-7) { return; }
   let C = len - bm.rest; let a = bm.comp * P.compScale / P.dt2;
-  let dl = -C / (w + a); let nrm = d / len;
+  let lam = select(lambda[b], 0.0, range.w == 1u);
+  let dl = (-C - a * lam) / (w + a); lambda[b] = lam + dl;
+  let nrm = d / len;
   nodes[i].pos = vec4f(pi.xyz - wi * dl * nrm, wi);
   nodes[j].pos = vec4f(pj.xyz + wj * dl * nrm, wj);
   let total = abs(len - bm.rest0) / bm.rest0; let brk = bm.brk * P.brkScale;
@@ -173,6 +210,7 @@ const K_BEAMS = COMMON + /* wgsl */`
   atomicMax(&stat[i * 2u], sn); atomicMax(&stat[j * 2u], sn);
   let pn = u32(clamp(abs(bm.rest - bm.rest0) / bm.rest0, 0.0, 4.0) * STRESS_SCALE);
   atomicMax(&stat[i * 2u + 1u], pn); atomicMax(&stat[j * 2u + 1u], pn);
+  if (range.z == 0u) { return; }
   if (total > brk) { beamAlive[b] = 0u; atomicAdd(&counters[0], 1u); return; }
   let pl = bm.plastic * P.plastScale;
   if (pl > 0.0) { let es = abs(len - bm.rest) / bm.rest0; if (es > bm.yieldS) { beams[b].rest = bm.rest + (len - bm.rest) * pl; } }
@@ -247,7 +285,7 @@ const K_COLLIDE = COMMON + /* wgsl */`
   }
   corr[i] = vec4f(acc, 0.0);
 }`;
-const K_FINISH = COMMON + /* wgsl */`
+const K_APPLY = COMMON + /* wgsl */`
 @group(0) @binding(0) var<uniform> P: Params;
 @group(0) @binding(1) var<storage, read_write> nodes: array<Node>;
 @group(0) @binding(2) var<storage, read_write> corr: array<vec4f>;
@@ -264,11 +302,17 @@ const K_FINISH = COMMON + /* wgsl */`
     p += corr[i].xyz; corr[i] = vec4f(0.0);
   }
   var prev = n.prev.xyz; let r = n.vel.w;
-  if (p.y < r) { p.y = r; let f = 1.0 - P.friction; prev.x = p.x - (p.x - prev.x) * f; prev.z = p.z - (p.z - prev.z) * f; }
-  let damp = max(0.0, 1.0 - P.damping * P.dt);
-  let v = (p - prev) / P.dt * damp;
+  if (p.y < r) { p.y = r; let f = 1.0 - P.friction; prev.x = p.x - (p.x - prev.x) * f; prev.z = p.z - (p.z - prev.z) * f; nodes[i].prev = vec4f(prev, 0.0); }
   nodes[i].pos = vec4f(p, n.pos.w);
-  nodes[i].vel = vec4f(v, r);
+}`;
+const K_VELOCITY = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read_write> nodes: array<Node>;
+@compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.nNodes) { return; }
+  let n = nodes[i]; if (n.info.x == 0u) { return; }
+  let damp = max(0.0, 1.0 - P.damping * P.dt);
+  nodes[i].vel = vec4f((n.pos.xyz - n.prev.xyz) / P.dt * damp, n.vel.w);
 }`;
 const K_ROTATE = COMMON + /* wgsl */`
 @group(0) @binding(0) var<uniform> P: Params;
@@ -1138,7 +1182,7 @@ function sphereVerts(la = 12, lo = 18) {
 const ui = id => document.getElementById(id);
 const msg = t => { const m = ui('msg'); m.style.display = t ? 'block' : 'none'; m.textContent = t || ''; };
 const canvas = ui('c');
-const P = { substeps: 10, gravity: 12, damping: 0.6, friction: 0.15, compScale: 1, brkScale: 1, plastScale: 1, viewMode: 0, skin: 2, voro: 1, fragSize: 3, ffd: 1, ballSpeed: 60, carSpeed: 45 };
+const P = { substeps: 10, gravity: 12, damping: 0.6, friction: 0.15, compScale: 1, brkScale: 1, plastScale: 1, viewMode: 0, skin: 2, voro: 1, fragSize: 3, ffd: 1, ballSpeed: 60, carSpeed: 45, iterations: 1, cheb: true, rho: 0.9, gamma: 0.9, chebDelay: 2 };
 
 let device, ctx, format, sim = null, paused = false, sceneInfo = null;
 const cam = { theta: 0.9, phi: 1.1, dist: 70, target: [24, 6, 5] };
@@ -1169,7 +1213,7 @@ const ST = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COP
 
 let pipes = null, renderPipes = null, geo = null, msaa = null;
 function initPipelines() {
-  pipes = { integrate: makeCompute(K_INTEGRATE), beams: makeCompute(K_BEAMS), hash: makeCompute(K_HASH), collide: makeCompute(K_COLLIDE), finish: makeCompute(K_FINISH), rotate: makeCompute(K_ROTATE), skin: makeCompute(K_SKIN), objsum: makeCompute(K_OBJSUM), actNodes: makeCompute(K_ACT_NODES), actBeams: makeCompute(K_ACT_BEAMS) };
+  pipes = { integrate: makeCompute(K_INTEGRATE), beams: makeCompute(K_BEAMS), hash: makeCompute(K_HASH), collide: makeCompute(K_COLLIDE), apply: makeCompute(K_APPLY), velocity: makeCompute(K_VELOCITY), cheb: makeCompute(K_CHEB), snap: makeCompute(K_SNAP), rotate: makeCompute(K_ROTATE), skin: makeCompute(K_SKIN), objsum: makeCompute(K_OBJSUM), actNodes: makeCompute(K_ACT_NODES), actBeams: makeCompute(K_ACT_BEAMS) };
   const mk = (code, buffers, cull, extra = {}) => device.createRenderPipeline({
     layout: 'auto',
     vertex: { module: device.createShaderModule({ code }), entryPoint: 'vs', buffers },
@@ -1222,17 +1266,25 @@ function createSim(data) {
   MAT_KEYS.forEach((k, i) => { const c = MAT_VIEW[k], b = MATS[k].color; pal[i * 4] = c[0]; pal[i * 4 + 1] = c[1]; pal[i * 4 + 2] = c[2]; pal[i * 4 + 3] = 1;
     pal[64 + i * 4] = b[0]; pal[64 + i * 4 + 1] = b[1]; pal[64 + i * 4 + 2] = b[2]; pal[64 + i * 4 + 3] = 1; });
   B.palette = buf(512, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, pal);
-  B.ranges = data.ranges.map(r => buf(16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, new Uint32Array([r[0], r[1], 0, 0])));
+  // 4 варианта флагов (last, first) на каждый цвет
+  B.ranges = [0, 1, 2, 3].map(fl => data.ranges.map(r => buf(16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, new Uint32Array([r[0], r[1], fl & 1, fl >> 1]))));
+  B.lambda = buf(Math.max(data.nb, 1) * 4, ST);
+  B.posK = buf(data.nTotal * 16, ST); B.posKm1 = buf(data.nTotal * 16, ST);
+  B.chebU = []; for (let i = 0; i < MAX_ITER; i++) B.chebU.push(buf(16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST));
   B.statStaging = [0, 1, 2].map(() => buf(64, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST));
   B.pickStaging = buf(data.nTotal * 64, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);
-  const flat = Object.assign({}, B); delete flat.ranges; delete flat.statStaging; const bufs = { ...flat }; data.ranges.forEach((r, i) => bufs['range' + i] = B.ranges[i]); B.statStaging.forEach((s, i) => bufs['stat' + i] = s);
+  const flat = Object.assign({}, B); delete flat.ranges; delete flat.statStaging; delete flat.chebU; const bufs = { ...flat };
+  B.ranges.forEach((arr, fl) => arr.forEach((r, i) => { bufs['range' + fl + '_' + i] = r; })); B.statStaging.forEach((s, i) => bufs['stat' + i] = s); B.chebU.forEach((s, i) => bufs['cheb' + i] = s);
   const groups = {
-    integrate: bind(pipes.integrate, [B.params, B.nodes]),
-    beams: B.ranges.map(r => bind(pipes.beams, [B.params, B.nodes, B.beams, B.beamAlive, B.stat, B.counters, r])),
+    integrate: bind(pipes.integrate, [B.params, B.nodes, B.posK, B.posKm1]),
+    beams: B.ranges.map(arr => arr.map(r => bind(pipes.beams, [B.params, B.nodes, B.beams, B.beamAlive, B.stat, B.counters, r, B.lambda]))),
+    cheb: B.chebU.map(u => bind(pipes.cheb, [B.params, B.nodes, B.posK, B.posKm1, u])),
+    snap: bind(pipes.snap, [B.params, B.nodes, B.posK, B.posKm1]),
+    velocity: bind(pipes.velocity, [B.params, B.nodes]),
     objsum: bind(pipes.objsum, [B.params, B.nodes, B.objSum]),
     hash: bind(pipes.hash, [B.params, B.nodes, B.hashCount, B.hashSlots]),
     collide: bind(pipes.collide, [B.params, B.nodes, B.nb, B.beamAlive, B.hashCount, B.hashSlots, B.balls, B.ballCorr, B.corr]),
-    finish: bind(pipes.finish, [B.params, B.nodes, B.corr, B.ballCorr]),
+    apply: bind(pipes.apply, [B.params, B.nodes, B.corr, B.ballCorr]),
     rotate: bind(pipes.rotate, [B.params, B.nodes, B.nb, B.beamAlive, B.rot, B.link, B.nb26]),
     skin: bind(pipes.skin, [B.params, B.nodes, B.nb26, B.link, B.rot, B.skin, B.cornerIdx, B.corners]),
     actNodes: bind(pipes.actNodes, [B.params, B.nodes]),
@@ -1293,19 +1345,30 @@ function tick() {
   }
   if (!paused) {
     enc.clearBuffer(B.stat);
-    const nSub = effSubsteps();
+    const nSub = effSubsteps(), nIter = P.iterations;
+    // коэффициенты Чебышёва на каждую итерацию: ω_1 = 1, ω_2 = 2/(2−ρ²), ω_{k+1} = 4/(4−ρ²ω_k)
+    // ω = 1 первые chebDelay итераций (ошибка ещё высокочастотная), дальше рекуррентно
+    if (P.cheb) { let om = 1; for (let it = 0; it < nIter; it++) { const k = it - P.chebDelay; if (k === 0) om = 2 / (2 - P.rho * P.rho); else if (k > 0) om = 4 / (4 - P.rho * P.rho * om); device.queue.writeBuffer(B.chebU[it], 0, new Float32Array([om, P.gamma, 0, 0])); } }
+    const useCheb = P.cheb && nIter > 1;
     for (let s = 0; s < nSub; s++) {
-      let p = enc.beginComputePass();
-      p.setPipeline(pipes.integrate); p.setBindGroup(0, G.integrate); p.dispatchWorkgroups(nG);
-      p.setPipeline(pipes.beams);
-      for (let c = 0; c < NCOLORS; c++) { const cnt = sim.ranges[c][1]; if (!cnt) continue; p.setBindGroup(0, G.beams[c]); p.dispatchWorkgroups(Math.ceil(cnt / WG)); }
-      p.end();
-      enc.clearBuffer(B.hashCount);
-      p = enc.beginComputePass();
-      p.setPipeline(pipes.hash); p.setBindGroup(0, G.hash); p.dispatchWorkgroups(nG);
-      p.setPipeline(pipes.collide); p.setBindGroup(0, G.collide); p.dispatchWorkgroups(nG);
-      p.setPipeline(pipes.finish); p.setBindGroup(0, G.finish); p.dispatchWorkgroups(nG);
-      p.end();
+      for (let it = 0; it < nIter; it++) {
+        const first = it === 0, last = it === nIter - 1;
+        let p = enc.beginComputePass();
+        if (first) { p.setPipeline(pipes.integrate); p.setBindGroup(0, G.integrate); p.dispatchWorkgroups(nG); }
+        if (useCheb) { p.setPipeline(pipes.snap); p.setBindGroup(0, G.snap); p.dispatchWorkgroups(nG); }
+        p.setPipeline(pipes.beams);
+        const groups = G.beams[(last ? 1 : 0) | (first ? 2 : 0)];
+        for (let c = 0; c < NCOLORS; c++) { const cnt = sim.ranges[c][1]; if (!cnt) continue; p.setBindGroup(0, groups[c]); p.dispatchWorkgroups(Math.ceil(cnt / WG)); }
+        if (useCheb) { p.setPipeline(pipes.cheb); p.setBindGroup(0, G.cheb[it]); p.dispatchWorkgroups(nG); }
+        p.end();
+        enc.clearBuffer(B.hashCount);
+        p = enc.beginComputePass();
+        p.setPipeline(pipes.hash); p.setBindGroup(0, G.hash); p.dispatchWorkgroups(nG);
+        p.setPipeline(pipes.collide); p.setBindGroup(0, G.collide); p.dispatchWorkgroups(nG);
+        p.setPipeline(pipes.apply); p.setBindGroup(0, G.apply); p.dispatchWorkgroups(nG);
+        if (last) { p.setPipeline(pipes.velocity); p.setBindGroup(0, G.velocity); p.dispatchWorkgroups(nG); }
+        p.end();
+      }
     }
   }
   enc.clearBuffer(B.objSum);
@@ -1334,7 +1397,7 @@ function tick() {
   if (pickCopied) { const req = pickRequest; pickRequest = null; const mine = sim;
     B.pickStaging.mapAsync(GPUMapMode.READ).then(() => { if (sim !== mine) return; const f = new Float32Array(B.pickStaging.getMappedRange()); const u = new Uint32Array(f.buffer); resolvePick(req, f, u, eye, vp); B.pickStaging.unmap(); sim.pickBusy = false; }).catch(() => {}); }
   frames++; if (now - fpsT > 500) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now;
-    ui('stats').innerHTML = `<b>${fps.toFixed(0)}</b> fps · кадр <b>${frameMs.toFixed(1)}</b> мс<br>вокселей: <b>${sim.n.toLocaleString('ru')}</b><br>балок: <b>${(sim.nb - sim.broken).toLocaleString('ru')}</b> / ${sim.nb.toLocaleString('ru')}<br>сломано: <b>${sim.broken.toLocaleString('ru')}</b><br>${sim.cells ? `ячеек Вороного: ${sim.cells}, ослаблено балок: ${sim.nbWeak.toLocaleString('ru')}<br>` : ''}${sim.ffdCount ? `FFD-треугольников: ${(sim.ffdCount / 3).toLocaleString('ru')}<br>` : ''}подшагов: ${effSubsteps()}${effSubsteps() !== P.substeps ? ' (' + P.substeps + ' × √жёсткости)' : ''}<br>dispatch/кадр: ${(paused ? 2 : effSubsteps() * (NCOLORS + 4) + 2) + (P.skin ? 1 : 0)}`; }
+    ui('stats').innerHTML = `<b>${fps.toFixed(0)}</b> fps · кадр <b>${frameMs.toFixed(1)}</b> мс<br>вокселей: <b>${sim.n.toLocaleString('ru')}</b><br>балок: <b>${(sim.nb - sim.broken).toLocaleString('ru')}</b> / ${sim.nb.toLocaleString('ru')}<br>сломано: <b>${sim.broken.toLocaleString('ru')}</b><br>${sim.cells ? `ячеек Вороного: ${sim.cells}, ослаблено балок: ${sim.nbWeak.toLocaleString('ru')}<br>` : ''}${sim.ffdCount ? `FFD-треугольников: ${(sim.ffdCount / 3).toLocaleString('ru')}<br>` : ''}подшагов: ${effSubsteps()}${effSubsteps() !== P.substeps ? ' (' + P.substeps + ' × √жёсткости)' : ''}<br>итераций: ${P.iterations}${P.cheb && P.iterations > 1 ? ' + Чебышёв' : ''}<br>dispatch/кадр: ${(paused ? 2 : effSubsteps() * (P.iterations * (NCOLORS + 3 + (P.cheb && P.iterations > 1 ? 2 : 0)) + 2) + 2) + (P.skin ? 1 : 0)}`; }
 }
 let lastT = performance.now(), frameMs = 16, fpsT = performance.now(), frames = 0, fps = 0, pickRequest = null;
 
@@ -1397,6 +1460,11 @@ ui('launch').addEventListener('click', launch);
 ui('pause').addEventListener('click', () => { paused = !paused; ui('pause').textContent = paused ? 'Продолжить' : 'Пауза'; });
 function bindSlider(id, fn, fmt) { const el = ui(id); const upd = () => { fn(+el.value); ui(id + 'V').textContent = fmt(+el.value); }; el.addEventListener('input', upd); upd(); }
 bindSlider('sub', v => { P.substeps = v; }, v => v.toFixed(0));
+bindSlider('iter', v => { P.iterations = v; }, v => v.toFixed(0));
+bindSlider('rho', v => { P.rho = v; }, v => v.toFixed(3));
+bindSlider('gamma', v => { P.gamma = v; }, v => v.toFixed(2));
+bindSlider('chebDelay', v => { P.chebDelay = v; }, v => v.toFixed(0));
+ui('cheb').addEventListener('change', e => { P.cheb = e.target.checked; });
 bindSlider('stiff', v => { P.compScale = Math.pow(10, -v); }, v => Math.pow(10, v).toFixed(1));
 bindSlider('brk', v => { P.brkScale = v; }, v => v.toFixed(2));
 bindSlider('plast', v => { P.plastScale = v; }, v => v.toFixed(2));
