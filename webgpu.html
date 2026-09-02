@@ -37,6 +37,7 @@
   <div class="row wallOpt"><label>Толщина стены</label><input type="range" id="wallT" min="1" max="4" step="1" value="1"><span class="val" id="wallTV">20</span></div>
   <div class="row towerOpt"><label>Несущие стойки</label><select id="towerCol"></select></div>
   <div class="row towerOpt"><label>Поперечные балки</label><select id="towerBeam"></select></div>
+  <div class="row towerOpt"><label>Армирование</label><select id="towerCore"></select></div>
   <div class="row"><label>Детализация</label>
     <select id="detail"><option value="1">1× (~2 тыс.)</option><option value="2" selected>2× (~20 тыс.)</option><option value="3">3× (~65 тыс.)</option><option value="4">4× (~150 тыс.)</option></select></div>
   <div class="btns">
@@ -1098,20 +1099,42 @@ function addWallWithPosts(B, obj, origin, WX, WY, WZ, wallMat, postMat) {
 // весом. Для балки квадратного сечения a×a пролётом L: наибольшее напряжение изгиба
 // 0.75*rho*g*L²/a, прогиб середины 0.15625*rho*g*L⁴/(E*a²). Требуем двукратный запас
 // по напряжению относительно предела sigma = E*min(yieldS, brk) и прогиб не больше L/50.
-function memberSize(matKey, L, g) {
-  const m = MATS[matKey], rg = m.rho * g, sig = m.E * Math.min(m.yieldS, m.brk);
-  const need = Math.max(1.5 * rg * L * L / sig, Math.sqrt(7.81 * rg * L * L * L / m.E));
-  return { need, a: Math.max(2, Math.min(8, Math.ceil(need))) };
+// coreKey — материал сердечника (армирование). Сечение a×a содержит сердечник
+// (a−2)×(a−2), остальное — оболочка; прочность, модуль и плотность усредняются по
+// площадям. Сердечник входит в требуемое сечение, поэтому решается итерацией.
+function memberSize(matKey, L, g, coreKey) {
+  const m = MATS[matKey], c = coreKey ? MATS[coreKey] : null;
+  const mix = a => {
+    const A = a * a, Ac = c && a >= 3 ? (a - 2) * (a - 2) : 0, As = A - Ac;
+    const w = (fm, fc) => ((c ? fc * Ac : 0) + fm * As) / A;
+    return { sig: w(m.E * Math.min(m.yieldS, m.brk), c ? c.E * Math.min(c.yieldS, c.brk) : 0),
+             E: w(m.E, c ? c.E : 0), rho: w(m.rho, c ? c.rho : 0) };
+  };
+  let a = 3, need = 0;
+  for (let it = 0; it < 6; it++) {
+    const q = mix(a), rg = q.rho * g;
+    // хрупкой оболочке нужен запас: она не течёт и не перераспределяет усилие,
+    // а рвётся, после чего сердечник остаётся один
+    const brittle = m.yieldS > 1 ? 1.3 : 1;
+    need = brittle * Math.max(1.5 * rg * L * L / q.sig, Math.sqrt(7.81 * rg * L * L * L / q.E));
+    a = Math.max(2, Math.min(6, Math.ceil(need)));   // 6 вокселей — потолок: дальше сцена неподъёмна
+  }
+  return { need, a };
 }
 // Прямой элемент квадратного сечения r×r от a к b: шагаем по самой длинной оси,
-// поэтому диагональ получается сплошной без дыр.
-function addStrut(B, obj, origin, a, b, mat, r = 2) {
-  const n = Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]), Math.abs(b[2] - a[2]));
+// поэтому диагональ получается сплошной без дыр. core — материал сердечника: им
+// заполняются воксели, отстоящие от поверхности на воксель по обеим поперечным осям.
+function addStrut(B, obj, origin, a, b, mat, r = 2, core = null) {
+  const d = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], ad = d.map(Math.abs);
+  const n = Math.max(...ad), ax = ad.indexOf(n);
   for (let i = 0; i <= n; i++) {
     const t = i / n;
-    const x = Math.round(a[0] + (b[0] - a[0]) * t), y = Math.round(a[1] + (b[1] - a[1]) * t), z = Math.round(a[2] + (b[2] - a[2]) * t);
-    for (let dx = 0; dx < r; dx++) for (let dy = 0; dy < r; dy++) for (let dz = 0; dz < r; dz++)
-      B.addVoxel(obj, x + dx, y + dy, z + dz, origin, mat, 0.04);
+    const p = [Math.round(a[0] + d[0] * t), Math.round(a[1] + d[1] * t), Math.round(a[2] + d[2] * t)];
+    for (let dx = 0; dx < r; dx++) for (let dy = 0; dy < r; dy++) for (let dz = 0; dz < r; dz++) {
+      const off = [dx, dy, dz];
+      const inner = core && r >= 3 && [0, 1, 2].every(k => k === ax || (off[k] > 0 && off[k] < r - 1));
+      B.addVoxel(obj, p[0] + dx, p[1] + dy, p[2] + dz, origin, inner ? core : mat, 0.04);
+    }
   }
 }
 function addBox(B, obj, origin, sx, sy, sz, mat, jitter = 0.05, fixed = false) {
@@ -1171,26 +1194,34 @@ const SCENES = {
   // прочности, сечение упирается в предел и в панели видно требуемое против взятого.
   tower: { name: 'Каркасная башня', launchLabel: 'Пустить блок', build(B, gy) {
     const W = 22, H = 60, BAYS = 3, AC = 3, o = [0, gy, 0], col = P.towerCol, br = P.towerBeam;
+    const core = P.towerCore === 'none' ? null : P.towerCore;   // сердечник армирования
     const span = W - 2 * AC;                       // пролёт между стойками
-    const ms = memberSize(br, span, P.gravity), ab = ms.a;
+    const ms = memberSize(br, span, P.gravity, core), ab = ms.a;
     const bay = Math.floor((H - ab) / BAYS);
     const rings = []; for (let i = 0; i <= BAYS; i++) rings.push(i * bay);
     const t = B.newObject();
     // угловые стойки на всю высоту; нижние два уровня закреплены как фундамент
     for (const [cx, cz] of [[0, 0], [W - AC, 0], [0, W - AC], [W - AC, W - AC]])
-      for (let x = 0; x < AC; x++) for (let y = 0; y < H; y++) for (let z = 0; z < AC; z++)
-        B.addVoxel(t, cx + x, y, cz + z, o, col, 0.04, y < 2);
+      for (let x = 0; x < AC; x++) for (let y = 0; y < H; y++) for (let z = 0; z < AC; z++) {
+        const inner = core && x > 0 && x < AC - 1 && z > 0 && z < AC - 1;
+        B.addVoxel(t, cx + x, y, cz + z, o, inner ? core : col, 0.04, y < 2);
+      }
     // горизонтальные пояса по периметру
     for (const ry of rings) for (let y = ry; y < ry + ab; y++)
-      for (let x = 0; x < W; x++) for (let z = 0; z < W; z++)
-        if (x < ab || x >= W - ab || z < ab || z >= W - ab) B.addVoxel(t, x, y, z, o, br, 0.04, y < 2);
+      for (let x = 0; x < W; x++) for (let z = 0; z < W; z++) {
+        const dOut = Math.min(x, z, W - 1 - x, W - 1 - z);   // до внешнего периметра
+        if (dOut >= ab) continue;                             // внутри кольца пусто
+        const inner = core && dOut >= 1 && ab - 1 - dOut >= 1 && y > ry && y < ry + ab - 1;
+        B.addVoxel(t, x, y, z, o, inner ? core : br, 0.04, y < 2);
+      }
     // раскосы крест-накрест: по два на каждую грань каждого пролёта
     const faces = [(u, y) => [u, y, 0], (u, y) => [u, y, W - ab], (u, y) => [0, y, u], (u, y) => [W - ab, y, u]];
     for (let b = 0; b + 1 < rings.length; b++) {
+      const as = ab;
       const y0 = rings[b] + ab, y1 = rings[b + 1] - 1, u0 = AC, u1 = W - AC - ab;
       for (const f of faces) {
-        addStrut(B, t, o, f(u0, y0), f(u1, y1), br, ab);
-        addStrut(B, t, o, f(u1, y0), f(u0, y1), br, ab);
+        addStrut(B, t, o, f(u0, y0), f(u1, y1), br, as, core);
+        addStrut(B, t, o, f(u1, y0), f(u0, y1), br, as, core);
       }
     }
     B.finalize();
@@ -1203,6 +1234,7 @@ const SCENES = {
       launch: () => [{ mode: 1, obj: block, vel: [P.carSpeed, 0, 0], strength: blockInvM }],
       info: m => `башня: ${(m[0] / 1000).toFixed(1)} т, ${(H * M_PER_UNIT).toFixed(1)} м<br>` +
         `пролёт ${(span * M_PER_UNIT).toFixed(1)} м, сечение ${(ab * M_PER_UNIT * 100).toFixed(0)} см` +
+        (core ? ` (армир. ${MAT_NAMES_RU[core]})` : '') +
         (ms.need > ab + 0.01 ? ` (нужно ${(ms.need * M_PER_UNIT * 100).toFixed(0)})` : '') + `<br>блок: ${(m[1] / 1000).toFixed(1)} т<br>` };
   } },
   jenga: { name: 'Дженга: отдельные блоки', build(B, gy) {
@@ -1333,7 +1365,7 @@ function sphereVerts(la = 12, lo = 18) {
 const ui = id => document.getElementById(id);
 const msg = t => { const m = ui('msg'); m.style.display = t ? 'block' : 'none'; m.textContent = t || ''; };
 const canvas = ui('c');
-const P = { substeps: 10, gravity: 12, damping: 0.6, friction: 0.15, compScale: 1, brkScale: 1, plastScale: 1, viewMode: 0, skin: 2, voro: 1, fragSize: 3, ffd: 1, wallMat: 'masonry', postMat: 'concrete', wallT: 1, towerCol: 'steel', towerBeam: 'wood', ballSpeed: 60, carSpeed: 45, iterations: 1, cheb: true, rho: 0.9, gamma: 0.9, chebDelay: 2 };
+const P = { substeps: 10, gravity: 12, damping: 0.6, friction: 0.15, compScale: 1, brkScale: 1, plastScale: 1, viewMode: 0, skin: 2, voro: 1, fragSize: 3, ffd: 1, wallMat: 'masonry', postMat: 'concrete', wallT: 1, towerCol: 'steel', towerBeam: 'wood', towerCore: 'none', ballSpeed: 60, carSpeed: 45, iterations: 1, cheb: true, rho: 0.9, gamma: 0.9, chebDelay: 2 };
 
 let device, ctx, format, sim = null, paused = false, sceneInfo = null;
 const cam = { theta: 0.9, phi: 1.1, dist: 70, target: [24, 6, 5] };
@@ -1630,7 +1662,8 @@ bindSlider('ballv', v => { P.ballSpeed = v; }, v => v.toFixed(0));
 for (const [key, sc] of Object.entries(SCENES)) { const o = document.createElement('option'); o.value = key; o.textContent = sc.name; ui('scene').appendChild(o); }
 // материалы стены и опор в сцене «Машина в стену»
 for (const [id, extra, def] of [['wallMat', [['masonry', 'кладка (кирпич + раствор)']], 'masonry'], ['postMat', [], 'concrete'],
-                                ['towerCol', [], 'steel'], ['towerBeam', [], 'wood']]) {
+                                ['towerCol', [], 'steel'], ['towerBeam', [], 'wood'],
+                                ['towerCore', [['none', 'нет']], 'none']]) {
   const el = ui(id);
   for (const [v, t] of extra.concat(MAT_KEYS.map(k => [k, MAT_NAMES_RU[k]]))) { const o = document.createElement('option'); o.value = v; o.textContent = t; el.appendChild(o); }
   el.value = def; P[id] = def;
