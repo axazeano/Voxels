@@ -32,6 +32,8 @@
   <h1>Воксели + мягкое тело · WebGPU</h1>
   <div class="row"><label>Сцена</label>
     <select id="scene"></select></div>
+  <div class="row wallOpt"><label>Материал стены</label><select id="wallMat"></select></div>
+  <div class="row wallOpt"><label>Материал опор</label><select id="postMat"></select></div>
   <div class="row"><label>Детализация</label>
     <select id="detail"><option value="1">1× (~2 тыс.)</option><option value="2" selected>2× (~20 тыс.)</option><option value="3">3× (~65 тыс.)</option><option value="4">4× (~150 тыс.)</option></select></div>
   <div class="btns">
@@ -997,13 +999,29 @@ function addCar(B, obj, x0, dir, gy, z0 = 0) {
     }
   B.finalize();
 }
+// opts.mat: 'masonry' (по умолчанию) — кирпич с раствором; иначе стена целиком из
+// указанного материала. 'anchor' делает её статичной, как опоры в других сценах.
 function addBrickWall(B, obj, origin, WX, WY, WZ, opts = {}) {
+  const mat = opts.mat && opts.mat !== 'masonry' ? opts.mat : null, fixed = mat === 'anchor';
   for (let x = 0; x < WX; x++) for (let y = 0; y < WY; y++) for (let z = 0; z < WZ; z++) {
     if (opts.skip && opts.skip(x, y, z)) continue;
+    if (mat) { B.addVoxel(obj, x, y, z, origin, mat, 0.05, fixed); continue; }
     const row = Math.floor(y / 2), shift = (row % 2) * 2;
     const mortar = (y % 2 === 1) || ((z + shift) % 4 === 3);
     B.addVoxel(obj, x, y, z, origin, mortar ? 'mortar' : 'brick', 0.05);
   }
+  B.finalize();
+}
+// Стена с боковыми опорами. Опоры примыкают к торцам стены и шире её на воксель
+// с каждой стороны; они в том же объекте, поэтому finalize связывает их со стеной
+// балками — опоры действительно держат стену, а не просто стоят рядом.
+// Координаты опор отрицательные и за пределами стены, зато origin общий: ключ сетки
+// считается по индексам, и разные origin в одном объекте столкнулись бы в карте.
+function addWallWithPosts(B, obj, origin, WX, WY, WZ, wallMat, postMat) {
+  addBrickWall(B, obj, origin, WX, WY, WZ, { mat: wallMat });
+  const PD = 3, fixed = postMat === 'anchor';
+  for (const z0 of [-PD, WZ]) for (let x = -1; x <= WX; x++) for (let y = 0; y < WY; y++) for (let z = 0; z < PD; z++)
+    B.addVoxel(obj, x, y, z0 + z, origin, postMat, 0.04, fixed);
   B.finalize();
 }
 function addBox(B, obj, origin, sx, sy, sz, mat, jitter = 0.05, fixed = false) {
@@ -1013,7 +1031,7 @@ function addBox(B, obj, origin, sx, sy, sz, mat, jitter = 0.05, fixed = false) {
 const SCENES = {
   car: { name: 'Машина в стену', launchLabel: 'Запустить машину', build(B, gy) {
     const car = B.newObject({ smooth: true }); addCar(B, car, 0, 1, gy);
-    const wall = B.newObject(); addBrickWall(B, wall, [36, gy, -10], 2, 18, 30);
+    const wall = B.newObject(); addWallWithPosts(B, wall, [36, gy, -10], 2, 18, 30, P.wallMat, P.postMat);
     return { center: [20, 6, 5], dist: 70, launch: () => [{ mode: 1, obj: car, vel: [P.carSpeed, 0, 0] }] };
   } },
   twocars: { name: 'Лобовое: две машины', launchLabel: 'Разогнать обе', build(B, gy) {
@@ -1182,7 +1200,7 @@ function sphereVerts(la = 12, lo = 18) {
 const ui = id => document.getElementById(id);
 const msg = t => { const m = ui('msg'); m.style.display = t ? 'block' : 'none'; m.textContent = t || ''; };
 const canvas = ui('c');
-const P = { substeps: 10, gravity: 12, damping: 0.6, friction: 0.15, compScale: 1, brkScale: 1, plastScale: 1, viewMode: 0, skin: 2, voro: 1, fragSize: 3, ffd: 1, ballSpeed: 60, carSpeed: 45, iterations: 1, cheb: true, rho: 0.9, gamma: 0.9, chebDelay: 2 };
+const P = { substeps: 10, gravity: 12, damping: 0.6, friction: 0.15, compScale: 1, brkScale: 1, plastScale: 1, viewMode: 0, skin: 2, voro: 1, fragSize: 3, ffd: 1, wallMat: 'masonry', postMat: 'concrete', ballSpeed: 60, carSpeed: 45, iterations: 1, cheb: true, rho: 0.9, gamma: 0.9, chebDelay: 2 };
 
 let device, ctx, format, sim = null, paused = false, sceneInfo = null;
 const cam = { theta: 0.9, phi: 1.1, dist: 70, target: [24, 6, 5] };
@@ -1473,6 +1491,16 @@ bindSlider('frag', v => { P.fragSize = v; }, v => v.toFixed(1));
 bindSlider('carv', v => { P.carSpeed = v; }, v => v.toFixed(0));
 bindSlider('ballv', v => { P.ballSpeed = v; }, v => v.toFixed(0));
 for (const [key, sc] of Object.entries(SCENES)) { const o = document.createElement('option'); o.value = key; o.textContent = sc.name; ui('scene').appendChild(o); }
+// материалы стены и опор в сцене «Машина в стену»
+for (const [id, extra, def] of [['wallMat', [['masonry', 'кладка (кирпич + раствор)']], 'masonry'], ['postMat', [], 'concrete']]) {
+  const el = ui(id);
+  for (const [v, t] of extra.concat(MAT_KEYS.map(k => [k, MAT_NAMES_RU[k]]))) { const o = document.createElement('option'); o.value = v; o.textContent = t; el.appendChild(o); }
+  el.value = def; P[id] = def;
+  el.addEventListener('change', e => { P[id] = e.target.value; resetScene(); });
+}
+function updateSceneOpts() { const on = ui('scene').value === 'car'; for (const el of document.querySelectorAll('.wallOpt')) el.style.display = on ? '' : 'none'; }
+ui('scene').addEventListener('change', updateSceneOpts);
+updateSceneOpts();
 const LEGENDS = { 1: ['0', 'порог разрыва'], 3: ['0 %', '20 % остаточной деформации'], 4: ['0', '3 ед. от формы в покое'], 5: ['0', '30 ед/с'] };
 const LEGEND_TEXT = { 6: 'цвет — ячейка Вороного; серый — материал без разбиения' };
 function updateLegend() {
