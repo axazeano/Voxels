@@ -35,6 +35,8 @@
   <div class="row wallOpt"><label>Материал стены</label><select id="wallMat"></select></div>
   <div class="row wallOpt"><label>Материал опор</label><select id="postMat"></select></div>
   <div class="row wallOpt"><label>Толщина стены</label><input type="range" id="wallT" min="1" max="4" step="1" value="1"><span class="val" id="wallTV">20</span></div>
+  <div class="row towerOpt"><label>Несущие стойки</label><select id="towerCol"></select></div>
+  <div class="row towerOpt"><label>Поперечные балки</label><select id="towerBeam"></select></div>
   <div class="row"><label>Детализация</label>
     <select id="detail"><option value="1">1× (~2 тыс.)</option><option value="2" selected>2× (~20 тыс.)</option><option value="3">3× (~65 тыс.)</option><option value="4">4× (~150 тыс.)</option></select></div>
   <div class="btns">
@@ -1078,6 +1080,17 @@ function addWallWithPosts(B, obj, origin, WX, WY, WZ, wallMat, postMat) {
     B.addVoxel(obj, x, y, z0 + z, origin, postMat, 0.04, fixed);
   B.finalize();
 }
+// Прямой элемент квадратного сечения r×r от a к b: шагаем по самой длинной оси,
+// поэтому диагональ получается сплошной без дыр.
+function addStrut(B, obj, origin, a, b, mat, r = 2) {
+  const n = Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]), Math.abs(b[2] - a[2]));
+  for (let i = 0; i <= n; i++) {
+    const t = i / n;
+    const x = Math.round(a[0] + (b[0] - a[0]) * t), y = Math.round(a[1] + (b[1] - a[1]) * t), z = Math.round(a[2] + (b[2] - a[2]) * t);
+    for (let dx = 0; dx < r; dx++) for (let dy = 0; dy < r; dy++) for (let dz = 0; dz < r; dz++)
+      B.addVoxel(obj, x + dx, y + dy, z + dz, origin, mat, 0.04);
+  }
+}
 function addBox(B, obj, origin, sx, sy, sz, mat, jitter = 0.05, fixed = false) {
   for (let x = 0; x < sx; x++) for (let y = 0; y < sy; y++) for (let z = 0; z < sz; z++) B.addVoxel(obj, x, y, z, origin, mat, jitter, fixed);
   B.finalize();
@@ -1127,6 +1140,37 @@ const SCENES = {
     const ramp = B.newObject(); addBox(B, ramp, [-66, 13 + gy, -9], 44, 2, 18, 'anchor', 0.03, true); // статичная эстакада
     const truck = B.newObject({ smooth: true, massKg: CAR_KG }); addCar(B, truck, -60, 1, 15 + gy, -5);
     return { center: [0, 10, 0], dist: 80, launchLabel: 'Пустить машину по мосту', launch: () => [{ mode: 1, obj: truck, vel: [P.carSpeed, 0, 0] }] };
+  } },
+  // Каркасная башня: четыре угловые стойки, горизонтальные пояса и раскосы крест-накрест
+  // на каждой грани. Материал стоек и поперечных элементов выбирается отдельно —
+  // видно, что несёт вес, а что держит форму: на мягких раскосах башня складывается
+  // вбок даже при стальных стойках, а на хрупких сначала осыпаются связи.
+  tower: { name: 'Каркасная башня', launchLabel: 'Пустить блок', build(B, gy) {
+    const W = 14, H = 44, o = [0, gy, 0], col = P.towerCol, br = P.towerBeam;
+    const rings = [0, 10, 20, 30, 42];
+    const t = B.newObject();
+    // угловые стойки 3×3 на всю высоту; нижние два уровня закреплены как фундамент
+    for (const [cx, cz] of [[0, 0], [W - 3, 0], [0, W - 3], [W - 3, W - 3]])
+      for (let x = 0; x < 3; x++) for (let y = 0; y < H; y++) for (let z = 0; z < 3; z++)
+        B.addVoxel(t, cx + x, y, cz + z, o, col, 0.04, y < 2);
+    // горизонтальные пояса по периметру
+    for (const ry of rings) for (let y = ry; y < ry + 2; y++)
+      for (let x = 0; x < W; x++) for (let z = 0; z < W; z++)
+        if (x < 2 || x >= W - 2 || z < 2 || z >= W - 2) B.addVoxel(t, x, y, z, o, br, 0.04, y < 2);
+    // раскосы: по два на каждую грань каждого пролёта
+    const faces = [(u, y) => [u, y, 0], (u, y) => [u, y, W - 2], (u, y) => [0, y, u], (u, y) => [W - 2, y, u]];
+    for (let b = 0; b + 1 < rings.length; b++) {
+      const y0 = rings[b] + 2, y1 = rings[b + 1] - 1;
+      for (const f of faces) {
+        addStrut(B, t, o, f(2, y0), f(W - 4, y1), br);
+        addStrut(B, t, o, f(W - 4, y0), f(2, y1), br);
+      }
+    }
+    B.finalize();
+    const block = B.newObject();
+    addBox(B, block, [-42, gy + 22, 2], 10, 10, 10, 'concrete');
+    return { center: [W / 2, 18, W / 2], dist: 95, launch: () => [{ mode: 1, obj: block, vel: [P.carSpeed, 0, 0] }],
+      info: m => `башня: ${(m[0] / 1000).toFixed(1)} т<br>блок: ${(m[1] / 1000).toFixed(1)} т<br>` };
   } },
   jenga: { name: 'Дженга: отдельные блоки', build(B, gy) {
     // 14 уровней по 3 бруска 12×2×4, уровни чередуют направление — проверка контактов между объектами
@@ -1256,7 +1300,7 @@ function sphereVerts(la = 12, lo = 18) {
 const ui = id => document.getElementById(id);
 const msg = t => { const m = ui('msg'); m.style.display = t ? 'block' : 'none'; m.textContent = t || ''; };
 const canvas = ui('c');
-const P = { substeps: 10, gravity: 12, damping: 0.6, friction: 0.15, compScale: 1, brkScale: 1, plastScale: 1, viewMode: 0, skin: 2, voro: 1, fragSize: 3, ffd: 1, wallMat: 'masonry', postMat: 'concrete', wallT: 1, ballSpeed: 60, carSpeed: 45, iterations: 1, cheb: true, rho: 0.9, gamma: 0.9, chebDelay: 2 };
+const P = { substeps: 10, gravity: 12, damping: 0.6, friction: 0.15, compScale: 1, brkScale: 1, plastScale: 1, viewMode: 0, skin: 2, voro: 1, fragSize: 3, ffd: 1, wallMat: 'masonry', postMat: 'concrete', wallT: 1, towerCol: 'steel', towerBeam: 'wood', ballSpeed: 60, carSpeed: 45, iterations: 1, cheb: true, rho: 0.9, gamma: 0.9, chebDelay: 2 };
 
 let device, ctx, format, sim = null, paused = false, sceneInfo = null;
 const cam = { theta: 0.9, phi: 1.1, dist: 70, target: [24, 6, 5] };
@@ -1552,13 +1596,18 @@ bindSlider('carv', v => { P.carSpeed = v; }, v => v.toFixed(0));
 bindSlider('ballv', v => { P.ballSpeed = v; }, v => v.toFixed(0));
 for (const [key, sc] of Object.entries(SCENES)) { const o = document.createElement('option'); o.value = key; o.textContent = sc.name; ui('scene').appendChild(o); }
 // материалы стены и опор в сцене «Машина в стену»
-for (const [id, extra, def] of [['wallMat', [['masonry', 'кладка (кирпич + раствор)']], 'masonry'], ['postMat', [], 'concrete']]) {
+for (const [id, extra, def] of [['wallMat', [['masonry', 'кладка (кирпич + раствор)']], 'masonry'], ['postMat', [], 'concrete'],
+                                ['towerCol', [], 'steel'], ['towerBeam', [], 'wood']]) {
   const el = ui(id);
   for (const [v, t] of extra.concat(MAT_KEYS.map(k => [k, MAT_NAMES_RU[k]]))) { const o = document.createElement('option'); o.value = v; o.textContent = t; el.appendChild(o); }
   el.value = def; P[id] = def;
   el.addEventListener('change', e => { P[id] = e.target.value; resetScene(); });
 }
-function updateSceneOpts() { const on = ui('scene').value === 'car'; for (const el of document.querySelectorAll('.wallOpt')) el.style.display = on ? '' : 'none'; }
+function updateSceneOpts() {
+  const sc = ui('scene').value;
+  for (const [cls, key] of [['.wallOpt', 'car'], ['.towerOpt', 'tower']])
+    for (const el of document.querySelectorAll(cls)) el.style.display = sc === key ? '' : 'none';
+}
 ui('scene').addEventListener('change', updateSceneOpts);
 updateSceneOpts();
 const LEGENDS = { 1: ['0', 'порог разрыва'], 3: ['0 %', '20 % остаточной деформации'], 4: ['0', '3 ед. от формы в покое'], 5: ['0', '30 ед/с'] };
