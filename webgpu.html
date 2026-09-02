@@ -46,6 +46,12 @@
   <div class="row"><label>Гравитация</label><input type="range" id="grav" min="0" max="40" step="1" value="12"><span class="val" id="gravV">12</span></div>
   <div class="row"><label>Скорость машины</label><input type="range" id="carv" min="15" max="90" step="5" value="45"><span class="val" id="carvV">45</span></div>
   <div class="row"><label>Сила ядра</label><input type="range" id="ballv" min="10" max="120" step="5" value="60"><span class="val" id="ballvV">60</span></div>
+  <div class="row"><label>Поверхность</label>
+    <select id="skin">
+      <option value="2" selected>Гладкая + FFD-кузова</option>
+      <option value="1">Гладкая (по узлам)</option>
+      <option value="0">Воксели</option>
+    </select></div>
   <div class="row"><label>Вид</label>
     <select id="view">
       <option value="0">Обычный</option>
@@ -54,11 +60,18 @@
       <option value="3">Пластическая деформация</option>
       <option value="4">Деформация (без сдвига объекта)</option>
       <option value="5">Скорость</option>
+      <option value="6">Осколки (ячейки Вороного)</option>
     </select></div>
+  <div class="row"><label>Разломы</label>
+    <select id="voro">
+      <option value="1" selected>Вороной (хрупкие материалы)</option>
+      <option value="0">По сетке</option>
+    </select></div>
+  <div class="row"><label>Размер осколка</label><input type="range" id="frag" min="1.5" max="6" step="0.5" value="3"><span class="val" id="fragV">3.0</span></div>
   <div id="legend"></div>
   <div class="help">
     <b>ЛКМ</b> — выстрел ядром, <b>Shift+ЛКМ</b> — взрыв<br>
-    <b>1–6</b> — переключение вида<br>
+    <b>1–7</b> — переключение вида, <b>S</b> — поверхность<br>
     <b>Перетаскивание</b> — камера, <b>колесо</b> — зум<br>
     <b>Space</b> — пауза, <b>R</b> — сброс
   </div>
@@ -75,20 +88,23 @@
 //  отдельный dispatch, внутри цвета ни одна пара балок не делит узел,
 //  поэтому получается настоящий Гаусс–Зейдель без гонок.
 //  Столкновения — spatial hash на GPU (счётчики через atomics, K слотов на ячейку).
+//  Рендер «гладкой» поверхности: узлы — вершины гексаэдральной решётки, угол ячейки
+//  2×2×2 — среднее по узлам ячейки, связанным живыми осевыми балками (K_SKIN).
 // ============================================================
 const MAX_BALLS = 16, MAX_OBJ = 128, K_SLOTS = 8, HASH_BITS = 18, HASH_SIZE = 1 << HASH_BITS, WG = 128;
 const STRESS_SCALE = 16384, BALL_FIX = 65536;
+// voro — множитель порога разрыва для балок, пересекающих границу ячеек Вороного (1 = разбиение не применяется)
 const MATS = {
-  metal:  { color:[0.82,0.18,0.16], comp:2.5e-6, yieldS:0.02,  plastic:0.15, brk:0.55, dens:1.0 },
-  steel:  { color:[0.60,0.64,0.70], comp:1.5e-6, yieldS:0.03,  plastic:0.10, brk:0.70, dens:1.6 },
-  glass:  { color:[0.70,0.88,1.00], comp:1.5e-6, yieldS:9,     plastic:0,    brk:0.02, dens:0.6 },
-  brick:  { color:[0.80,0.38,0.22], comp:1.5e-6, yieldS:9,     plastic:0,    brk:0.025,dens:1.3 },
-  mortar: { color:[0.72,0.66,0.58], comp:2.5e-6, yieldS:9,     plastic:0,    brk:0.015,dens:1.2 },
-  rubber: { color:[0.13,0.13,0.15], comp:1.0e-5, yieldS:9,     plastic:0,    brk:1.5,  dens:0.8 },
-  jelly:  { color:[0.35,0.90,0.55], comp:2.5e-4, yieldS:9,     plastic:0,    brk:2.5,  dens:0.5 },
-  wood:   { color:[0.60,0.42,0.22], comp:4.0e-6, yieldS:0.05,  plastic:0.05, brk:0.09, dens:0.7 },
-  concrete:{color:[0.52,0.53,0.55], comp:1.2e-6, yieldS:9,     plastic:0,    brk:0.02, dens:1.5 },
-  anchor: { color:[0.30,0.32,0.36], comp:1.0e-6, yieldS:9,     plastic:0,    brk:9,    dens:4.0 },
+  metal:  { color:[0.82,0.18,0.16], comp:2.5e-6, yieldS:0.02,  plastic:0.15, brk:0.55, dens:1.0, voro:1 },
+  steel:  { color:[0.60,0.64,0.70], comp:1.5e-6, yieldS:0.03,  plastic:0.10, brk:0.70, dens:1.6, voro:1 },
+  glass:  { color:[0.70,0.88,1.00], comp:1.5e-6, yieldS:9,     plastic:0,    brk:0.02, dens:0.6, voro:0.2 },
+  brick:  { color:[0.80,0.38,0.22], comp:1.5e-6, yieldS:9,     plastic:0,    brk:0.025,dens:1.3, voro:1 },   // швы задаёт раствор
+  mortar: { color:[0.72,0.66,0.58], comp:2.5e-6, yieldS:9,     plastic:0,    brk:0.015,dens:1.2, voro:1 },
+  rubber: { color:[0.13,0.13,0.15], comp:1.0e-5, yieldS:9,     plastic:0,    brk:1.5,  dens:0.8, voro:1 },
+  jelly:  { color:[0.35,0.90,0.55], comp:2.5e-4, yieldS:9,     plastic:0,    brk:2.5,  dens:0.5, voro:1 },
+  wood:   { color:[0.60,0.42,0.22], comp:4.0e-6, yieldS:0.05,  plastic:0.05, brk:0.09, dens:0.7, voro:0.6 },
+  concrete:{color:[0.52,0.53,0.55], comp:1.2e-6, yieldS:9,     plastic:0,    brk:0.02, dens:1.5, voro:0.25 },
+  anchor: { color:[0.30,0.32,0.36], comp:1.0e-6, yieldS:9,     plastic:0,    brk:9,    dens:4.0, voro:1 },
 };
 // заметно различающаяся палитра для режима «Материалы»
 const MAT_VIEW = { metal:[0.95,0.25,0.25], steel:[0.75,0.78,0.85], glass:[0.35,0.75,1.0], brick:[1.0,0.55,0.2], mortar:[0.95,0.9,0.6], rubber:[0.25,0.25,0.3], jelly:[0.3,0.95,0.4], wood:[0.8,0.55,0.25], concrete:[0.6,0.6,0.65], anchor:[0.9,0.3,0.9] };
@@ -109,7 +125,7 @@ struct Params {
   friction: f32, compScale: f32, brkScale: f32, plastScale: f32,
   nNodes: u32, nBeams: u32, hashMask: u32, ballCount: u32,
   cellInv: f32, voxel: f32, viewMode: u32, actMode: u32,
-  actObj: u32, pad0: u32, pad1: u32, pad2: u32,
+  actObj: u32, skinMode: u32, pad1: u32, pad2: u32,
   actCenter: vec4f, actVel: vec4f,
 };
 // pos.w = обратная масса, vel.w = радиус, info = (alive, big, mat, obj | ballIdx)
@@ -260,20 +276,26 @@ const K_ROTATE = COMMON + /* wgsl */`
 @group(0) @binding(2) var<storage, read_write> nb: array<NodeNb>;
 @group(0) @binding(3) var<storage, read_write> beamAlive: array<u32>;
 @group(0) @binding(4) var<storage, read_write> rot: array<mat3x3f>;
+// link: биты 0..5 — живые осевые связи, 8..13 — исходные осевые соседи, 16 — узел FFD-объекта
+@group(0) @binding(5) var<storage, read_write> link: array<u32>;
+@group(0) @binding(6) var<storage, read> nb26r: array<array<u32, 32>>;
 fn safeNorm(v: vec3f) -> vec3f { let l = length(v); if (l < 1e-8) { return vec3f(1.0, 0.0, 0.0); } return v / l; }
 @compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
   let i = g.x; if (i >= P.nNodes) { return; }
-  let n = nodes[i]; if (n.info.x == 0u || n.info.y == 1u) { return; }
+  let stat0 = nb26r[i][13];
+  let n = nodes[i]; if (n.info.x == 0u || n.info.y == 1u) { link[i] = stat0; return; }
   let p = n.pos.xyz; let mynb = nb[i];
   var ax = array<vec3f, 3>(vec3f(0.0), vec3f(0.0), vec3f(0.0));
   var has = array<bool, 3>(false, false, false);
+  var mask = 0u;
   for (var d = 0u; d < 6u; d++) {
     let j = mynb.id[d >> 2u][d & 3u]; if (j == 0xffffffffu) { continue; }
     let b = mynb.beam[d >> 2u][d & 3u]; if (beamAlive[b] == 0u) { continue; }
     if (nodes[j].info.x == 0u) { continue; }
     let sgn = select(1.0, -1.0, (d & 1u) == 1u);
-    let a = d >> 1u; ax[a] += (nodes[j].pos.xyz - p) * sgn; has[a] = true;
+    let a = d >> 1u; ax[a] += (nodes[j].pos.xyz - p) * sgn; has[a] = true; mask |= 1u << d;
   }
+  link[i] = mask | stat0;
   let cnt = u32(has[0]) + u32(has[1]) + u32(has[2]);
   if (cnt == 0u) { return; }
   let R = rot[i];
@@ -287,6 +309,78 @@ fn safeNorm(v: vec3f) -> vec3f { let l = length(v); if (l < 1e-8) { return vec3f
   else if (!has[0]) { ex = cross(ey, ez); }
   ex = safeNorm(ex); ey = safeNorm(ey - dot(ey, ex) * ex); ez = cross(ex, ey);
   rot[i] = mat3x3f(ex, ey, ez);
+}`;
+// Гладкая поверхность. Для каждого узла — 8 углов его вокселя. Угол делят до 8 узлов
+// ячейки 2×2×2; берём те из них, что связаны с узлом живыми осевыми балками внутри
+// ячейки (компонента связности по 12 рёбрам), и усредняем их «предложения»
+// p_j + R_j·(±h,±h,±h). Нормаль угла — сумма нормалей видимых граней тех же узлов.
+// Все узлы одной компоненты получают одинаковый угол, поэтому швов между гранями нет,
+// а мёртвая балка сразу раскрывает трещину.
+const K_SKIN = COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> P: Params;
+@group(0) @binding(1) var<storage, read> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read> nb26: array<array<u32, 32>>; // 26 соседей по сетке, индекс (dx+1)*9+(dy+1)*3+(dz+1)
+@group(0) @binding(3) var<storage, read> link: array<u32>;
+@group(0) @binding(4) var<storage, read> rot: array<mat3x3f>;
+@group(0) @binding(5) var<storage, read_write> skin: array<vec4f>; // [(i*8+c)*2] позиция угла, [+1] нормаль (w = плоская грань скола)
+@group(0) @binding(6) var<storage, read> cornerIdx: array<u32>;     // индекс в corners или 0xffffffff
+@group(0) @binding(7) var<storage, read> corners: array<vec4f>;     // отсечённые углы приграничных узлов
+fn nbIdx(o: vec3i) -> u32 { return u32((o.x + 1) * 9 + (o.y + 1) * 3 + (o.z + 1)); }
+@compute @workgroup_size(${WG}) fn main(@builtin(global_invocation_id) g: vec3u) {
+  let i = g.x; if (i >= P.nNodes) { return; }
+  let n = nodes[i]; if (n.info.x == 0u || n.info.y == 1u) { return; }
+  let h = P.voxel * 0.47;
+  var anyFrac = false;
+  for (var c = 0u; c < 8u; c++) {
+    let sc = vec3i(select(-1, 1, (c & 1u) != 0u), select(-1, 1, (c & 2u) != 0u), select(-1, 1, (c & 4u) != 0u));
+    // узлы ячейки: бит k — смещение вдоль оси в сторону угла
+    var ids: array<u32, 8>; var lk: array<u32, 8>; var present = 0u;
+    for (var k = 0u; k < 8u; k++) {
+      let o = vec3i(select(0, sc.x, (k & 1u) != 0u), select(0, sc.y, (k & 2u) != 0u), select(0, sc.z, (k & 4u) != 0u));
+      let id = select(nb26[i][nbIdx(o)], i, k == 0u);
+      ids[k] = id; lk[k] = select(0u, link[id], id != 0xffffffffu);
+      if (id != 0xffffffffu && nodes[id].info.x != 0u) { present |= 1u << k; }
+    }
+    // компонента связности узла i внутри ячейки
+    var comp = 1u;
+    for (var it = 0u; it < 7u; it++) {
+      let before = comp;
+      for (var k = 0u; k < 8u; k++) {
+        for (var a = 0u; a < 3u; a++) {
+          let bit = 1u << a; if ((k & bit) != 0u) { continue; }
+          let d = a * 2u + select(0u, 1u, sc[a] < 0); // от k к k|bit — по оси a в сторону угла
+          if ((lk[k] & (1u << d)) == 0u) { continue; }
+          let pair = (1u << k) | (1u << (k | bit));
+          if ((comp & pair) != 0u) { comp |= pair; }
+        }
+      }
+      if (comp == before || comp == 255u) { break; }
+    }
+    // через угол проходит скол — берём углы, отсечённые плоскостями Вороного
+    let frac = comp != present;
+    if (frac) { anyFrac = true; }
+    var ps = vec3f(0.0); var ns = vec3f(0.0); var cnt = 0.0;
+    for (var k = 0u; k < 8u; k++) {
+      if ((comp & (1u << k)) == 0u) { continue; }
+      let j = ids[k]; let R = rot[j]; let ck = c ^ k; // тот же угол в локальной нумерации узла j
+      let s = vec3f(select(-1.0, 1.0, (ck & 1u) != 0u), select(-1.0, 1.0, (ck & 2u) != 0u), select(-1.0, 1.0, (ck & 4u) != 0u));
+      var off = s * h;
+      if (frac) { let ci = cornerIdx[j]; if (ci != 0xffffffffu) { off = corners[ci * 8u + ck].xyz; } }
+      ps += nodes[j].pos.xyz + R * off; cnt += 1.0;
+      for (var a = 0u; a < 3u; a++) {
+        let d = a * 2u + select(0u, 1u, s[a] < 0.0);
+        if ((lk[k] & (1u << d)) == 0u) { ns += R[a] * s[a]; } // грань без соседа видна
+      }
+    }
+    let o = (i * 8u + c) * 2u;
+    skin[o] = vec4f(ps / cnt, 0.0);
+    let nl = length(ns);
+    skin[o + 1u] = vec4f(select(vec3f(0.0, 1.0, 0.0), ns / nl, nl > 1e-6), select(0.0, 1.0, frac));
+  }
+  // w нулевого угла — признак «узел затронут сколом»: по нему гладкая поверхность
+  // включается там, где FFD-оболочка порвана
+  let lk0 = link[i];
+  skin[i * 16u].w = select(0.0, 1.0, anyFrac || (lk0 & 63u) != ((lk0 >> 8u) & 63u));
 }`;
 const K_OBJSUM = COMMON + /* wgsl */`
 @group(0) @binding(0) var<uniform> P: Params;
@@ -343,18 +437,9 @@ fn shade(base: vec3f, nrm: vec3f, wpos: vec3f, cam: Cam) -> vec3f {
   let f = clamp((dist - cam.fog.w) / (cam.fog.w * 1.2), 0.0, 1.0);
   return mix(c, cam.fog.xyz, f);
 }`;
-const R_CUBES = COMMON + R_COMMON + /* wgsl */`
-@group(0) @binding(0) var<uniform> cam: Cam;
-@group(0) @binding(1) var<storage, read> nodes: array<Node>;
-@group(0) @binding(2) var<storage, read> rot: array<mat3x3f>;
-@group(0) @binding(3) var<storage, read> colors: array<vec4f>;
-@group(0) @binding(4) var<storage, read> stat: array<u32>;
-@group(0) @binding(5) var<uniform> P: Params;
-@group(0) @binding(6) var<storage, read> pos0: array<vec4f>;
-@group(0) @binding(7) var<storage, read> objSum: array<i32>;
-@group(0) @binding(8) var<storage, read> cent0: array<vec4f>;
-@group(0) @binding(9) var<uniform> palette: array<vec4f, 16>;
-struct VOut { @builtin(position) pos: vec4f, @location(0) color: vec3f, @location(1) nrm: vec3f, @location(2) wpos: vec3f };
+// цвет узла по режиму вида; требует привязок colors, stat, P, pos0, objSum, cent0, palette
+const R_COLOR = /* wgsl */`
+struct VOut { @builtin(position) pos: vec4f, @location(0) color: vec3f, @location(1) nrm: vec3f, @location(2) wpos: vec3f, @location(3) @interpolate(flat) flatFace: f32 };
 // тепловая карта: тёмно-синий → голубой → жёлтый → красный
 fn heat(t0: f32) -> vec3f {
   let t = clamp(t0, 0.0, 1.0);
@@ -363,15 +448,8 @@ fn heat(t0: f32) -> vec3f {
   if (t < 0.66) { return mix(c1, c2, (t - 0.33) / 0.33); }
   return mix(c2, c3, (t - 0.66) / 0.34);
 }
-@vertex fn vs(@location(0) vp: vec3f, @location(1) vn: vec3f, @builtin(instance_index) ii: u32) -> VOut {
-  var o: VOut;
-  let n = nodes[ii];
-  if (n.info.x == 0u || n.info.y == 1u) { o.pos = vec4f(0.0, 0.0, 2.0, 1.0); return o; }
-  let R = rot[ii]; let s = P.voxel * 0.94;
-  let wp = n.pos.xyz + R * (vp * s);
-  o.pos = cam.viewProj * vec4f(wp, 1.0);
-  o.nrm = R * vn; o.wpos = wp;
-  var col = colors[ii].xyz;
+fn nodeColor(ii: u32, n: Node, base: vec3f) -> vec3f {
+  var col = base;
   switch (P.viewMode) {
     case 1u: { col = heat(f32(stat[ii * 2u]) / STRESS_SCALE); }                    // напряжение, 0..порог разрыва
     case 2u: { col = palette[n.info.z].xyz; }                                       // материал
@@ -383,13 +461,138 @@ fn heat(t0: f32) -> vec3f {
       col = heat(length(d) / 3.0);
     }
     case 5u: { col = heat(length(n.vel.xyz) / 30.0); }                              // скорость, 0..30
+    case 6u: {                                                                      // ячейка Вороного: псевдослучайный цвет по номеру
+      let id = u32(pos0[ii].w);
+      if (id == 0u) { col = vec3f(0.25, 0.27, 0.3); } else {
+        let h = id * 2654435761u;
+        col = vec3f(0.35, 0.35, 0.35) + 0.6 * vec3f(f32(h & 255u), f32((h >> 8u) & 255u), f32((h >> 16u) & 255u)) / 255.0;
+      }
+    }
     default: {}
   }
-  o.color = col;
-  return o;
+  return col;
 }
 @fragment fn fs(in: VOut) -> @location(0) vec4f {
-  return vec4f(shade(in.color, normalize(in.nrm), in.wpos, cam), 1.0);
+  // производные вызываются вне ветвления — WGSL требует однородного потока управления
+  let g = cross(dpdx(in.wpos), dpdy(in.wpos));
+  let gl = length(g);
+  var flat = select(vec3f(0.0, 1.0, 0.0), g / max(gl, 1e-12), gl > 1e-12);
+  if (dot(flat, cam.camPos.xyz - in.wpos) < 0.0) { flat = -flat; }
+  // грань скола плоская — нормаль берём из геометрии, иначе интерполированную
+  var nrm = select(normalize(in.nrm), flat, in.flatFace > 0.5 && gl > 1e-12);
+  return vec4f(shade(in.color, nrm, in.wpos, cam), 1.0);
+}`;
+const R_CUBES = COMMON + R_COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> cam: Cam;
+@group(0) @binding(1) var<storage, read> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read> rot: array<mat3x3f>;
+@group(0) @binding(3) var<storage, read> colors: array<vec4f>;
+@group(0) @binding(4) var<storage, read> stat: array<u32>;
+@group(0) @binding(5) var<uniform> P: Params;
+@group(0) @binding(6) var<storage, read> pos0: array<vec4f>;
+@group(0) @binding(7) var<storage, read> objSum: array<i32>;
+@group(0) @binding(8) var<storage, read> cent0: array<vec4f>;
+@group(0) @binding(9) var<uniform> palette: array<vec4f, 32>;
+` + R_COLOR + /* wgsl */`
+@vertex fn vs(@location(0) vp: vec3f, @location(1) vn: vec3f, @builtin(instance_index) ii: u32) -> VOut {
+  var o: VOut;
+  let n = nodes[ii];
+  if (n.info.x == 0u || n.info.y == 1u) { o.pos = vec4f(0.0, 0.0, 2.0, 1.0); return o; }
+  let R = rot[ii]; let s = P.voxel * 0.94;
+  let wp = n.pos.xyz + R * (vp * s);
+  o.pos = cam.viewProj * vec4f(wp, 1.0);
+  o.nrm = R * vn; o.wpos = wp; o.flatFace = 0.0;
+  o.color = nodeColor(ii, n, colors[ii].xyz);
+  return o;
+}`;
+// Гладкая поверхность: 6 граней × 2 треугольника на узел, без вершинного буфера.
+// Грань видна, если в её направлении нет живой осевой связи (нет соседа, сосед мёртв или балка порвана).
+const R_SKIN = COMMON + R_COMMON + /* wgsl */`
+@group(0) @binding(0) var<uniform> cam: Cam;
+@group(0) @binding(1) var<storage, read> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read> skin: array<vec4f>;
+@group(0) @binding(3) var<storage, read> link: array<u32>;
+@group(0) @binding(4) var<storage, read> colors: array<vec4f>;
+@group(0) @binding(5) var<storage, read> stat: array<u32>;
+@group(0) @binding(6) var<uniform> P: Params;
+@group(0) @binding(7) var<storage, read> pos0: array<vec4f>;
+@group(0) @binding(8) var<storage, read> objSum: array<i32>;
+@group(0) @binding(9) var<storage, read> cent0: array<vec4f>;
+@group(0) @binding(10) var<uniform> palette: array<vec4f, 32>;
+` + R_COLOR + /* wgsl */`
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> VOut {
+  var o: VOut;
+  let ii = vi / 36u; let f = (vi / 6u) % 6u; let q = vi % 6u;
+  let n = nodes[ii]; let lk = link[ii];
+  if (n.info.x == 0u || n.info.y == 1u || (lk & (1u << f)) != 0u) { o.pos = vec4f(0.0, 0.0, 2.0, 1.0); return o; }
+  // у FFD-объекта гладкая поверхность по узлам рисуется только там, где прошёл скол
+  if (P.skinMode == 2u && (lk & 0x10000u) != 0u && skin[ii * 16u].w < 0.5) { o.pos = vec4f(0.0, 0.0, 2.0, 1.0); return o; }
+  let a = f >> 1u; let neg = (f & 1u) == 1u;
+  let u = (a + 1u) % 3u; let v = (a + 2u) % 3u;
+  // обход квада: (u-,v-), (u+,v-), (u+,v+), (u-,v+) — против часовой при взгляде снаружи для +грани; для −грани наоборот
+  var QI = array<u32, 6>(0u, 1u, 2u, 0u, 2u, 3u);
+  var qc = QI[q]; if (neg) { qc = (4u - qc) & 3u; }
+  var c = select(0u, 1u << a, !neg);
+  if (qc == 1u || qc == 2u) { c |= 1u << u; }
+  if (qc == 2u || qc == 3u) { c |= 1u << v; }
+  let s = skin[(ii * 8u + c) * 2u]; let nr = skin[(ii * 8u + c) * 2u + 1u];
+  o.pos = cam.viewProj * vec4f(s.xyz, 1.0);
+  o.nrm = nr.xyz; o.wpos = s.xyz; o.flatFace = nr.w;
+  o.color = nodeColor(ii, n, colors[ii].xyz);
+  return o;
+}`;
+// FFD-оболочка: вершина привязана трилинейными весами к 8 узлам ячейки решётки.
+// Позиция — взвешенная сумма позиций узлов, нормаль — взвешенная сумма повёрнутых
+// нормалей покоя. Если ячейка распалась (узел погиб или порвана внутренняя балка),
+// треугольник убирается, и под ним показывается гладкая поверхность по узлам.
+const R_FFD = COMMON + R_COMMON + /* wgsl */`
+struct FV { ids: array<vec4u, 2>, w: array<vec4f, 2>, nrm: vec4f };
+@group(0) @binding(0) var<uniform> cam: Cam;
+@group(0) @binding(1) var<storage, read> nodes: array<Node>;
+@group(0) @binding(2) var<storage, read> rot: array<mat3x3f>;
+@group(0) @binding(3) var<storage, read> verts: array<FV>;
+@group(0) @binding(4) var<storage, read> link: array<u32>;
+@group(0) @binding(5) var<storage, read> stat: array<u32>;
+@group(0) @binding(6) var<uniform> P: Params;
+@group(0) @binding(7) var<storage, read> pos0: array<vec4f>;
+@group(0) @binding(8) var<storage, read> objSum: array<i32>;
+@group(0) @binding(9) var<storage, read> cent0: array<vec4f>;
+@group(0) @binding(10) var<uniform> palette: array<vec4f, 32>;
+` + R_COLOR + /* wgsl */`
+@vertex fn vs(@builtin(vertex_index) vi: u32) -> VOut {
+  var o: VOut; o.flatFace = 0.0;
+  let v = verts[vi];
+  var ps = vec3f(0.0); var nr = vec3f(0.0); var orig = 0u; var alive = 0u;
+  for (var k = 0u; k < 8u; k++) {
+    let id = v.ids[k >> 2u][k & 3u]; if (id == 0xffffffffu) { continue; }
+    orig |= 1u << k;
+    if (nodes[id].info.x != 0u) { alive |= 1u << k; }
+    let w = v.w[k >> 2u][k & 3u];
+    ps += nodes[id].pos.xyz * w; nr += (rot[id] * v.nrm.xyz) * w;
+  }
+  if (alive != orig) { o.pos = vec4f(0.0, 0.0, 2.0, 1.0); return o; }
+  var comp = orig & (~orig + 1u); // младший присутствующий узел
+  for (var it = 0u; it < 7u; it++) {
+    let before = comp;
+    for (var k = 0u; k < 8u; k++) {
+      if ((orig & (1u << k)) == 0u) { continue; }
+      let lk = link[v.ids[k >> 2u][k & 3u]];
+      for (var a = 0u; a < 3u; a++) {
+        let bit = 1u << a; if ((k & bit) != 0u) { continue; }
+        if ((orig & (1u << (k | bit))) == 0u) { continue; }
+        if ((lk & (1u << (a * 2u))) == 0u) { continue; }
+        let pair = (1u << k) | (1u << (k | bit));
+        if ((comp & pair) != 0u) { comp |= pair; }
+      }
+    }
+    if (comp == before) { break; }
+  }
+  if (comp != orig) { o.pos = vec4f(0.0, 0.0, 2.0, 1.0); return o; }
+  let rep = bitcast<u32>(v.nrm.w); let n = nodes[rep];
+  o.pos = cam.viewProj * vec4f(ps, 1.0);
+  o.nrm = nr; o.wpos = ps;
+  o.color = nodeColor(rep, n, palette[16u + n.info.z].xyz);
+  return o;
 }`;
 const R_GROUND = R_COMMON + /* wgsl */`
 @group(0) @binding(0) var<uniform> cam: Cam;
@@ -430,11 +633,51 @@ class Builder {
   constructor(k) {
     this.k = k; this.S = 1 / k;
     this.nodes = []; // временно: [x,y,z,invMass,radius,mat,obj]
-    this.colors = [];
-    this.maps = []; this.objCount = 0; this.pending = [];
+    this.colors = []; this.grid = []; // координаты узла в мелкой сетке (для таблицы 26 соседей)
+    this.maps = []; this.smooth = []; this.objCount = 0; this.pending = [];
     this.bI = []; this.bJ = []; this.bColor = []; this.bDir = [];
+    this.voro = P.voro; this.fragSize = P.fragSize; // разбиение Вороного: включено ли и шаг семян (в базовых вокселях)
+    this.cell = null; this.cellCount = 0;
   }
-  newObject() { if (this.objCount >= MAX_OBJ) throw new Error('слишком много объектов'); this.maps.push(new Map()); return this.objCount++; }
+  // Разбиение Вороного: для каждого объекта с хрупким материалом ставим семена на сетке
+  // с шагом fragSize и случайным сдвигом, каждому узлу — ближайшее семя.
+  // Балки, пересекающие границу ячеек, получают порог разрыва × voro материала,
+  // поэтому тело рвётся по границам, и физические осколки совпадают с ячейками.
+  assignCells() {
+    const n = this.nodes.length, cell = new Uint32Array(n);
+    this.cell = cell; this.cellCount = 1; this.seedPos = [null]; // 0 — вне разбиения
+    if (!this.voro) return;
+    const byObj = new Map();
+    for (let i = 0; i < n; i++) { const o = this.nodes[i][6]; let a = byObj.get(o); if (!a) byObj.set(o, a = []); a.push(i); }
+    const sp = this.fragSize, jit = 0.3 * sp;
+    for (const ids of byObj.values()) {
+      if (!ids.some(i => this.nodes[i][5].voro < 1)) continue;
+      let lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+      for (const i of ids) { const v = this.nodes[i]; for (let a = 0; a < 3; a++) { lo[a] = Math.min(lo[a], v[a]); hi[a] = Math.max(hi[a], v[a]); } }
+      const dim = [0, 1, 2].map(a => Math.max(1, Math.ceil((hi[a] - lo[a]) / sp) + 1));
+      const key = (x, y, z) => x + y * dim[0] + z * dim[0] * dim[1];
+      const seeds = new Map(); const base = this.cellCount;
+      for (let z = 0; z < dim[2]; z++) for (let y = 0; y < dim[1]; y++) for (let x = 0; x < dim[0]; x++) {
+        const px = lo[0] + x * sp + (Math.random() * 2 - 1) * jit, py = lo[1] + y * sp + (Math.random() * 2 - 1) * jit, pz = lo[2] + z * sp + (Math.random() * 2 - 1) * jit;
+        this.seedPos.push([px, py, pz]); seeds.set(key(x, y, z), [px, py, pz, this.cellCount++]);
+      }
+      for (const i of ids) {
+        const v = this.nodes[i];
+        const gx = Math.round((v[0] - lo[0]) / sp), gy = Math.round((v[1] - lo[1]) / sp), gz = Math.round((v[2] - lo[2]) / sp);
+        let best = base, bd = Infinity;
+        for (let dz = -2; dz <= 2; dz++) for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
+          const x = gx + dx, y = gy + dy, z = gz + dz; if (x < 0 || y < 0 || z < 0 || x >= dim[0] || y >= dim[1] || z >= dim[2]) continue;
+          const sd = seeds.get(key(x, y, z)); const d = (sd[0] - v[0]) ** 2 + (sd[1] - v[1]) ** 2 + (sd[2] - v[2]) ** 2;
+          if (d < bd) { bd = d; best = sd[3]; }
+        }
+        cell[i] = best;
+        // лёгкая тонировка по ячейке, чтобы осколки читались и до разрушения
+        if (v[5].voro < 1) { const t = ((best * 2654435761) >>> 0) / 4294967296 * 0.12 - 0.06; const c = this.colors[i]; for (let a = 0; a < 3; a++) c[a] = Math.min(1, Math.max(0, c[a] + t)); }
+      }
+    }
+  }
+  // opts.smooth — объекту строится FFD-оболочка (гладкий кузов, привязанный к решётке)
+  newObject(opts = {}) { if (this.objCount >= MAX_OBJ) throw new Error('слишком много объектов'); this.maps.push(new Map()); this.smooth.push(!!opts.smooth && !!P.ffd); return this.objCount++; }
   // базовый воксель (в координатах грубой сетки) -> k^3 мелких
   addVoxel(obj, ix, iy, iz, origin, matName, jitter = 0.06, fixed = false) {
     const m = MATS[matName], k = this.k, S = this.S, map = this.maps[obj];
@@ -446,7 +689,7 @@ class Builder {
       const jit = (Math.random() * 2 - 1) * jitter;
       this.nodes.push([origin[0] + (gx + 0.5) * S, origin[1] + (gy + 0.5) * S, origin[2] + (gz + 0.5) * S, fixed ? 0 : 1 / m.dens, 0.45 * S, m, obj]);
       this.colors.push([Math.min(1, Math.max(0, m.color[0] + jit)), Math.min(1, Math.max(0, m.color[1] + jit)), Math.min(1, Math.max(0, m.color[2] + jit))]);
-      map.set(key, id); this.pending.push([id, gx, gy, gz, obj]);
+      map.set(key, id); this.pending.push([id, gx, gy, gz, obj]); this.grid.push([gx, gy, gz]);
     }
   }
   finalize() {
@@ -464,8 +707,181 @@ class Builder {
     }
     this.pending.length = 0;
   }
+  // 26 соседей по сетке (внутри объекта); слот 13 (сам узел) свободен и хранит
+  // статическую маску осевых соседей (биты 8..13) и признак FFD-объекта (бит 16)
+  buildNb26(nTotal) {
+    const n = this.nodes.length, nb26 = new Uint32Array(nTotal * 32).fill(0xffffffff);
+    for (let i = 0; i < n; i++) {
+      const g = this.grid[i], obj = this.nodes[i][6], map = this.maps[obj], o = i * 32;
+      let mask0 = 0;
+      for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+        const j = map.get((g[0] + dx) + (g[1] + dy) * 4096 + (g[2] + dz) * 4096 * 4096);
+        if (j === undefined) continue;
+        const t = (dx + 1) * 9 + (dy + 1) * 3 + (dz + 1);
+        if (t !== 13) nb26[o + t] = j;
+        if (Math.abs(dx) + Math.abs(dy) + Math.abs(dz) === 1) { const a = dx !== 0 ? 0 : (dy !== 0 ? 1 : 2), sg = dx + dy + dz; mask0 |= 1 << (a * 2 + (sg < 0 ? 1 : 0)); }
+      }
+      nb26[o + 13] = (mask0 << 8) | (this.smooth[obj] ? 0x10000 : 0);
+    }
+    return nb26;
+  }
+  // Плоские грани сколов: угол вокселя, оказавшийся за биссекторной плоскостью между
+  // семенем своей ячейки и семенем соседней, проецируется на эту плоскость
+  // (несколько итераций поочерёдных проекций на нарушенные полупространства).
+  // Узлы по разные стороны границы проецируются на одну плоскость, поэтому после
+  // разрыва обе поверхности скола плоские и совпадают по срезу.
+  // Смещения хранятся только для приграничных узлов; cornerIdx — индекс в компактном массиве.
+  clipCorners(nb26, nTotal) {
+    const n = this.nodes.length, h = 0.47 * this.S;
+    const cornerIdx = new Uint32Array(nTotal).fill(0xffffffff);
+    const out = [];
+    if (this.voro) for (let i = 0; i < n; i++) {
+      const ci = this.cell[i]; if (!ci) continue;
+      const o = i * 32, others = [];
+      for (let t = 0; t < 27; t++) {
+        if (t === 13) continue; const j = nb26[o + t]; if (j === 0xffffffff) continue;
+        const cj = this.cell[j]; if (cj && cj !== ci && others.indexOf(cj) < 0) others.push(cj);
+      }
+      if (!others.length) continue;
+      const s0 = this.seedPos[ci], pl = [];
+      for (const cj of others) {
+        const sd = this.seedPos[cj];
+        let nx = sd[0] - s0[0], ny = sd[1] - s0[1], nz = sd[2] - s0[2];
+        const L = Math.hypot(nx, ny, nz); if (L < 1e-9) continue;
+        nx /= L; ny /= L; nz /= L;
+        pl.push([nx, ny, nz, (nx * (sd[0] + s0[0]) + ny * (sd[1] + s0[1]) + nz * (sd[2] + s0[2])) * 0.5]);
+      }
+      if (!pl.length) continue;
+      const v = this.nodes[i];
+      cornerIdx[i] = out.length / 32;
+      for (let c = 0; c < 8; c++) {
+        let px = v[0] + ((c & 1) ? h : -h), py = v[1] + ((c & 2) ? h : -h), pz = v[2] + ((c & 4) ? h : -h);
+        for (let it = 0; it < 4; it++) for (const q of pl) {
+          const t = q[0] * px + q[1] * py + q[2] * pz - q[3];
+          if (t > 0) { px -= q[0] * t; py -= q[1] * t; pz -= q[2] * t; }
+        }
+        const cl = x => Math.max(-h, Math.min(h, x));
+        out.push(cl(px - v[0]), cl(py - v[1]), cl(pz - v[2]), 0);
+      }
+    }
+    return { cornerIdx, corners: new Float32Array(out.length ? out : 32) };
+  }
+  // FFD-оболочка (аналог flexbody из BeamNG): гладкая сетка строится методом surface nets
+  // по занятости решётки. Жёсткие материалы объекта дают одну общую оболочку (кузов,
+  // крыша и стёкла — цельная поверхность, цвет берётся у ближайшего узла), резина —
+  // отдельную, иначе колёса слипаются с кузовом. Вершина surface nets лежит внутри
+  // ячейки 2×2×2, поэтому привязывается трилинейными весами к её 8 узлам.
+  buildFFD() {
+    const n = this.nodes.length, S = this.S;
+    const K = (x, y, z) => x + y * 4096 + z * 4096 * 4096;
+    const groups = new Map();
+    for (let i = 0; i < n; i++) {
+      const obj = this.nodes[i][6]; if (!this.smooth[obj]) continue;
+      const gk = obj * 4 + (this.nodes[i][5] === MATS.rubber ? 1 : 0);
+      let m = groups.get(gk); if (!m) groups.set(gk, m = new Map());
+      m.set(K(this.grid[i][0], this.grid[i][1], this.grid[i][2]), i);
+    }
+    const VP = [], VB = [], VI = [], VN = [], idx = [];
+    for (const occ of groups.values()) {
+      const cellV = new Map();
+      for (const id of occ.values()) {
+        const g = this.grid[id];
+        for (let dx = -1; dx <= 0; dx++) for (let dy = -1; dy <= 0; dy++) for (let dz = -1; dz <= 0; dz++) {
+          const cx = g[0] + dx, cy = g[1] + dy, cz = g[2] + dz, ck = K(cx, cy, cz);
+          if (cellV.has(ck)) continue;
+          const ids = [-1, -1, -1, -1, -1, -1, -1, -1];
+          let cnt = 0, ref = -1, refK = 0;
+          for (let k = 0; k < 8; k++) {
+            const j = occ.get(K(cx + (k & 1), cy + ((k >> 1) & 1), cz + ((k >> 2) & 1)));
+            if (j !== undefined) { ids[k] = j; cnt++; if (ref < 0) { ref = j; refK = k; } }
+          }
+          if (cnt === 0 || cnt === 8) { cellV.set(ck, -1); continue; }
+          const rp = this.nodes[ref];
+          const base = [rp[0] - (refK & 1) * S, rp[1] - ((refK >> 1) & 1) * S, rp[2] - ((refK >> 2) & 1) * S];
+          const cp = k => [base[0] + (k & 1) * S, base[1] + ((k >> 1) & 1) * S, base[2] + ((k >> 2) & 1) * S];
+          let sx = 0, sy = 0, sz = 0, ne = 0;
+          for (let k = 0; k < 8; k++) for (const bit of [1, 2, 4]) {
+            if (k & bit) continue;
+            if ((ids[k] >= 0) === (ids[k | bit] >= 0)) continue;
+            const a = cp(k), b = cp(k | bit);
+            sx += (a[0] + b[0]) * 0.5; sy += (a[1] + b[1]) * 0.5; sz += (a[2] + b[2]) * 0.5; ne++;
+          }
+          if (!ne) { cellV.set(ck, -1); continue; }
+          cellV.set(ck, VP.length);
+          VP.push([sx / ne, sy / ne, sz / ne]); VB.push(base); VI.push(ids);
+        }
+      }
+      // сглаживание Лапласа по 6 соседним ячейкам; вершина не покидает свою ячейку,
+      // поэтому трилинейные веса остаются точными
+      const keys = [...cellV.keys()];
+      for (let it = 0; it < 3; it++) {
+        const upd = [];
+        for (const ck of keys) {
+          const vi = cellV.get(ck); if (vi < 0) continue;
+          const cz = Math.floor(ck / (4096 * 4096)), cy = Math.floor((ck - cz * 4096 * 4096) / 4096), cx = ck - cz * 4096 * 4096 - cy * 4096;
+          let ax = 0, ay = 0, az = 0, c = 0;
+          for (const d of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]]) {
+            const nv = cellV.get(K(cx + d[0], cy + d[1], cz + d[2]));
+            if (nv === undefined || nv < 0) continue;
+            ax += VP[nv][0]; ay += VP[nv][1]; az += VP[nv][2]; c++;
+          }
+          if (!c) continue;
+          const q = VP[vi], b = VB[vi], cl = (x, lo) => Math.max(lo, Math.min(lo + S, x));
+          upd.push([vi, [cl(q[0] * 0.35 + ax / c * 0.65, b[0]), cl(q[1] * 0.35 + ay / c * 0.65, b[1]), cl(q[2] * 0.35 + az / c * 0.65, b[2])]]);
+        }
+        for (const [vi, q] of upd) VP[vi] = q;
+      }
+      // четырёхугольник на каждое ребро решётки со сменой занятости; обход против
+      // часовой стрелки со стороны пустоты, чтобы работал отсев задних граней
+      for (const id of occ.values()) {
+        const g = this.grid[id];
+        for (let a = 0; a < 3; a++) for (const dir of [1, -1]) {
+          const e = [0, 0, 0]; e[a] = dir;
+          if (occ.has(K(g[0] + e[0], g[1] + e[1], g[2] + e[2]))) continue;
+          const m = [g[0], g[1], g[2]]; if (dir < 0) m[a] -= 1;
+          const u = (a + 1) % 3, v = (a + 2) % 3, q = [];
+          for (const [du, dv] of [[0, 0], [-1, 0], [-1, -1], [0, -1]]) {
+            const c = [m[0], m[1], m[2]]; c[u] += du; c[v] += dv;
+            const vi = cellV.get(K(c[0], c[1], c[2]));
+            if (vi === undefined || vi < 0) { q.length = 0; break; }
+            q.push(vi);
+          }
+          if (q.length !== 4) continue;
+          if (dir > 0) idx.push(q[0], q[1], q[2], q[0], q[2], q[3]);
+          else idx.push(q[0], q[2], q[1], q[0], q[3], q[2]);
+        }
+      }
+    }
+    for (let i = 0; i < VP.length; i++) VN.push([0, 0, 0]);
+    for (let t = 0; t < idx.length; t += 3) {
+      const a = VP[idx[t]], b = VP[idx[t + 1]], c = VP[idx[t + 2]];
+      const nx = (b[1] - a[1]) * (c[2] - a[2]) - (b[2] - a[2]) * (c[1] - a[1]);
+      const ny = (b[2] - a[2]) * (c[0] - a[0]) - (b[0] - a[0]) * (c[2] - a[2]);
+      const nz = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+      for (let k = 0; k < 3; k++) { const w = VN[idx[t + k]]; w[0] += nx; w[1] += ny; w[2] += nz; }
+    }
+    // упаковка вершины: 8 узлов ячейки, 8 трилинейных весов, нормаль покоя и узел-представитель для цвета
+    const nv = VP.length, vbuf = new ArrayBuffer(Math.max(nv, 1) * 80);
+    const vf = new Float32Array(vbuf), vu = new Uint32Array(vbuf);
+    for (let i = 0; i < nv; i++) {
+      const p = VP[i], b = VB[i], ids = VI[i], o = i * 20;
+      const t = [0, 1, 2].map(a => Math.max(0, Math.min(1, (p[a] - b[a]) / S)));
+      let sum = 0, best = -1, bw = -1; const w = [];
+      for (let k = 0; k < 8; k++) {
+        if (ids[k] < 0) { w.push(0); continue; }
+        const wk = ((k & 1) ? t[0] : 1 - t[0]) * (((k >> 1) & 1) ? t[1] : 1 - t[1]) * (((k >> 2) & 1) ? t[2] : 1 - t[2]);
+        w.push(wk); sum += wk; if (wk > bw) { bw = wk; best = ids[k]; }
+      }
+      if (sum < 1e-6) { for (let k = 0; k < 8; k++) w[k] = ids[k] >= 0 ? 1 : 0; sum = w.reduce((a, b) => a + b, 0); best = ids.find(x => x >= 0); }
+      for (let k = 0; k < 8; k++) { vu[o + k] = ids[k] < 0 ? 0xffffffff : ids[k]; vf[o + 8 + k] = w[k] / sum; }
+      const nn = VN[i], L = Math.hypot(nn[0], nn[1], nn[2]) || 1;
+      vf[o + 16] = nn[0] / L; vf[o + 17] = nn[1] / L; vf[o + 18] = nn[2] / L; vu[o + 19] = Math.max(0, best);
+    }
+    return { vbuf, ffdIdx: new Uint32Array(idx.length ? idx : 1), ffdCount: idx.length, ffdVerts: nv };
+  }
   build() {
     const n = this.nodes.length, nTotal = n + MAX_BALLS, nb = this.bI.length, k = this.k;
+    this.assignCells(); const cell = this.cell; let nbWeak = 0;
     const nodeBuf = new ArrayBuffer(nTotal * 64), nf = new Float32Array(nodeBuf), nu = new Uint32Array(nodeBuf);
     const colors = new Float32Array(nTotal * 4);
     const nbArr = new Uint32Array(nTotal * 16).fill(0xffffffff);
@@ -494,15 +910,20 @@ class Builder {
       const o = dst * 8;
       bu[o] = i; bu[o + 1] = j; bf[o + 2] = len; bf[o + 3] = len;
       bf[o + 4] = Math.max(mi.comp, mj.comp); bf[o + 5] = weak.yieldS * k; bf[o + 6] = weak.plastic; bf[o + 7] = weak.brk * k;
+      if (cell[i] !== cell[j] && weak.voro < 1) { bf[o + 7] *= weak.voro; nbWeak++; }
       beamAlive[dst] = 1;
       const d = this.bDir[b];
       if (d !== 255) { nbArr[i * 16 + d] = j; nbArr[i * 16 + 8 + d] = dst; nbArr[j * 16 + (d ^ 1)] = i; nbArr[j * 16 + 8 + (d ^ 1)] = dst; }
     }
-    const pos0 = new Float32Array(nTotal * 4); for (let i = 0; i < n; i++) { pos0[i * 4] = nf[i * 16]; pos0[i * 4 + 1] = nf[i * 16 + 1]; pos0[i * 4 + 2] = nf[i * 16 + 2]; }
+    // pos0.w — номер ячейки Вороного (для режима вида «Осколки»)
+    const pos0 = new Float32Array(nTotal * 4); for (let i = 0; i < n; i++) { pos0[i * 4] = nf[i * 16]; pos0[i * 4 + 1] = nf[i * 16 + 1]; pos0[i * 4 + 2] = nf[i * 16 + 2]; pos0[i * 4 + 3] = cell[i]; }
+    const nb26 = this.buildNb26(nTotal);
+    const { cornerIdx, corners } = this.clipCorners(nb26, nTotal);
+    const ffd = this.buildFFD();
     const cent0 = new Float32Array(MAX_OBJ * 4), cnt = new Float32Array(MAX_OBJ);
     for (let i = 0; i < n; i++) { const o = this.nodes[i][6]; if (o >= MAX_OBJ) continue; cent0[o * 4] += pos0[i * 4]; cent0[o * 4 + 1] += pos0[i * 4 + 1]; cent0[o * 4 + 2] += pos0[i * 4 + 2]; cnt[o]++; }
     for (let o = 0; o < MAX_OBJ; o++) if (cnt[o]) { cent0[o * 4] /= cnt[o]; cent0[o * 4 + 1] /= cnt[o]; cent0[o * 4 + 2] /= cnt[o]; }
-    return { n, nTotal, nb, nodeBuf, colors, nbArr, beamBuf, beamAlive, ranges, S: this.S, pos0, cent0 };
+    return { n, nTotal, nb, nodeBuf, colors, nbArr, nb26, cornerIdx, corners, beamBuf, beamAlive, ranges, S: this.S, pos0, cent0, cells: this.cellCount - 1, nbWeak, ...ffd };
   }
 }
 // Все сцены строятся в «базовых» вокселях; детализация дробит каждый на k^3.
@@ -547,13 +968,13 @@ function addBox(B, obj, origin, sx, sy, sz, mat, jitter = 0.05, fixed = false) {
 }
 const SCENES = {
   car: { name: 'Машина в стену', launchLabel: 'Запустить машину', build(B, gy) {
-    const car = B.newObject(); addCar(B, car, 0, 1, gy);
+    const car = B.newObject({ smooth: true }); addCar(B, car, 0, 1, gy);
     const wall = B.newObject(); addBrickWall(B, wall, [36, gy, -10], 2, 18, 30);
     return { center: [20, 6, 5], dist: 70, launch: () => [{ mode: 1, obj: car, vel: [P.carSpeed, 0, 0] }] };
   } },
   twocars: { name: 'Лобовое: две машины', launchLabel: 'Разогнать обе', build(B, gy) {
-    const a = B.newObject(); addCar(B, a, -30, 1, gy);
-    const b = B.newObject(); addCar(B, b, 30, -1, gy);
+    const a = B.newObject({ smooth: true }); addCar(B, a, -30, 1, gy);
+    const b = B.newObject({ smooth: true }); addCar(B, b, 30, -1, gy);
     return { center: [11, 6, 5], dist: 75, launch: () => [{ mode: 1, obj: a, vel: [P.carSpeed, 0, 0] }, { mode: 1, obj: b, vel: [-P.carSpeed, 0, 0] }] };
   } },
   materials: { name: 'Падение: сравнение материалов', build(B, gy) {
@@ -586,7 +1007,7 @@ const SCENES = {
     B.finalize();
     const load = B.newObject(); addBox(B, load, [-3, 15 + gy, 3], 6, 4, 4, 'concrete');
     const ramp = B.newObject(); addBox(B, ramp, [-66, 13 + gy, -9], 44, 2, 18, 'anchor', 0.03, true); // статичная эстакада
-    const truck = B.newObject(); addCar(B, truck, -60, 1, 15 + gy, -5);
+    const truck = B.newObject({ smooth: true }); addCar(B, truck, -60, 1, 15 + gy, -5);
     return { center: [0, 10, 0], dist: 80, launchLabel: 'Пустить машину по мосту', launch: () => [{ mode: 1, obj: truck, vel: [P.carSpeed, 0, 0] }] };
   } },
   jenga: { name: 'Дженга: отдельные блоки', build(B, gy) {
@@ -639,7 +1060,7 @@ const SCENES = {
     return { center: [W / 2, 8, D / 2], dist: 65 };
   } },
   jelly: { name: 'Желе, башня, стекло', build(B, gy) {
-    const jelly = B.newObject(); const J = 12;
+    const jelly = B.newObject({ smooth: true }); const J = 12;
     for (let x = 0; x < J; x++) for (let y = 0; y < J; y++) for (let z = 0; z < J; z++) B.addVoxel(jelly, x, y, z, [-6, 14, -6], 'jelly', 0.04);
     B.finalize();
     const tower = B.newObject();
@@ -717,7 +1138,7 @@ function sphereVerts(la = 12, lo = 18) {
 const ui = id => document.getElementById(id);
 const msg = t => { const m = ui('msg'); m.style.display = t ? 'block' : 'none'; m.textContent = t || ''; };
 const canvas = ui('c');
-const P = { substeps: 10, gravity: 12, damping: 0.6, friction: 0.15, compScale: 1, brkScale: 1, plastScale: 1, viewMode: 0, ballSpeed: 60, carSpeed: 45 };
+const P = { substeps: 10, gravity: 12, damping: 0.6, friction: 0.15, compScale: 1, brkScale: 1, plastScale: 1, viewMode: 0, skin: 2, voro: 1, fragSize: 3, ffd: 1, ballSpeed: 60, carSpeed: 45 };
 
 let device, ctx, format, sim = null, paused = false, sceneInfo = null;
 const cam = { theta: 0.9, phi: 1.1, dist: 70, target: [24, 6, 5] };
@@ -748,7 +1169,7 @@ const ST = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COP
 
 let pipes = null, renderPipes = null, geo = null, msaa = null;
 function initPipelines() {
-  pipes = { integrate: makeCompute(K_INTEGRATE), beams: makeCompute(K_BEAMS), hash: makeCompute(K_HASH), collide: makeCompute(K_COLLIDE), finish: makeCompute(K_FINISH), rotate: makeCompute(K_ROTATE), objsum: makeCompute(K_OBJSUM), actNodes: makeCompute(K_ACT_NODES), actBeams: makeCompute(K_ACT_BEAMS) };
+  pipes = { integrate: makeCompute(K_INTEGRATE), beams: makeCompute(K_BEAMS), hash: makeCompute(K_HASH), collide: makeCompute(K_COLLIDE), finish: makeCompute(K_FINISH), rotate: makeCompute(K_ROTATE), skin: makeCompute(K_SKIN), objsum: makeCompute(K_OBJSUM), actNodes: makeCompute(K_ACT_NODES), actBeams: makeCompute(K_ACT_BEAMS) };
   const mk = (code, buffers, cull, extra = {}) => device.createRenderPipeline({
     layout: 'auto',
     vertex: { module: device.createShaderModule({ code }), entryPoint: 'vs', buffers },
@@ -758,6 +1179,8 @@ function initPipelines() {
     multisample: { count: 4 }, ...extra });
   renderPipes = {
     cubes: mk(R_CUBES, [{ arrayStride: 24, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }, { shaderLocation: 1, offset: 12, format: 'float32x3' }] }], 'back'),
+    skin: mk(R_SKIN, [], 'back'),
+    ffd: mk(R_FFD, [], 'back'),
     ground: mk(R_GROUND, [], 'none'),
     spheres: mk(R_SPHERES, [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }], 'back'),
   };
@@ -787,8 +1210,18 @@ function createSim(data) {
   const rotInit = new Float32Array(data.nTotal * 12); for (let i = 0; i < data.nTotal; i++) { rotInit[i * 12] = 1; rotInit[i * 12 + 5] = 1; rotInit[i * 12 + 10] = 1; }
   B.rot = buf(data.nTotal * 48, ST, rotInit);
   B.pos0 = buf(data.nTotal * 16, ST, data.pos0);
-  const pal = new Float32Array(64); MAT_KEYS.forEach((k, i) => { const c = MAT_VIEW[k]; pal[i * 4] = c[0]; pal[i * 4 + 1] = c[1]; pal[i * 4 + 2] = c[2]; pal[i * 4 + 3] = 1; });
-  B.palette = buf(256, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, pal);
+  B.link = buf(data.nTotal * 4, ST);
+  B.nb26 = buf(data.nTotal * 128, ST, data.nb26);
+  B.skin = buf(data.nTotal * 8 * 2 * 16, ST);
+  B.cornerIdx = buf(data.nTotal * 4, ST, data.cornerIdx);
+  B.corners = buf(data.corners.byteLength, ST, data.corners);
+  B.ffdVerts = buf(data.vbuf.byteLength, ST, new Uint8Array(data.vbuf));
+  B.ffdIdx = buf(data.ffdIdx.byteLength, GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST, data.ffdIdx);
+  // 0..15 — палитра режима «Материалы», 16..31 — базовые цвета материалов (для FFD-оболочки)
+  const pal = new Float32Array(128);
+  MAT_KEYS.forEach((k, i) => { const c = MAT_VIEW[k], b = MATS[k].color; pal[i * 4] = c[0]; pal[i * 4 + 1] = c[1]; pal[i * 4 + 2] = c[2]; pal[i * 4 + 3] = 1;
+    pal[64 + i * 4] = b[0]; pal[64 + i * 4 + 1] = b[1]; pal[64 + i * 4 + 2] = b[2]; pal[64 + i * 4 + 3] = 1; });
+  B.palette = buf(512, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, pal);
   B.ranges = data.ranges.map(r => buf(16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST, new Uint32Array([r[0], r[1], 0, 0])));
   B.statStaging = [0, 1, 2].map(() => buf(64, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST));
   B.pickStaging = buf(data.nTotal * 64, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);
@@ -800,14 +1233,17 @@ function createSim(data) {
     hash: bind(pipes.hash, [B.params, B.nodes, B.hashCount, B.hashSlots]),
     collide: bind(pipes.collide, [B.params, B.nodes, B.nb, B.beamAlive, B.hashCount, B.hashSlots, B.balls, B.ballCorr, B.corr]),
     finish: bind(pipes.finish, [B.params, B.nodes, B.corr, B.ballCorr]),
-    rotate: bind(pipes.rotate, [B.params, B.nodes, B.nb, B.beamAlive, B.rot]),
+    rotate: bind(pipes.rotate, [B.params, B.nodes, B.nb, B.beamAlive, B.rot, B.link, B.nb26]),
+    skin: bind(pipes.skin, [B.params, B.nodes, B.nb26, B.link, B.rot, B.skin, B.cornerIdx, B.corners]),
     actNodes: bind(pipes.actNodes, [B.params, B.nodes]),
     actBeams: bind(pipes.actBeams, [B.params, B.nodes, B.beams, B.beamAlive, B.counters]),
     cubes: bind(renderPipes.cubes, [B.cam, B.nodes, B.rot, B.colors, B.stat, B.params, B.pos0, B.objSum, B.cent0, B.palette]),
+    skinR: bind(renderPipes.skin, [B.cam, B.nodes, B.skin, B.link, B.colors, B.stat, B.params, B.pos0, B.objSum, B.cent0, B.palette]),
+    ffd: bind(renderPipes.ffd, [B.cam, B.nodes, B.rot, B.ffdVerts, B.link, B.stat, B.params, B.pos0, B.objSum, B.cent0, B.palette]),
     ground: bind(renderPipes.ground, [B.cam]),
     spheres: bind(renderPipes.spheres, [B.cam, B.nodes, B.balls]),
   };
-  sim = { n: data.n, nTotal: data.nTotal, nb: data.nb, S: data.S, ranges: data.ranges, buffers: bufs, B, groups, ballCount: 0, ballNext: 0, ballIds: new Uint32Array(MAX_BALLS), broken: 0, statIdx: 0, statBusy: [false, false, false], pickBusy: false, actions: [] };
+  sim = { ffdCount: data.ffdCount, ffdVerts: data.ffdVerts, n: data.n, nTotal: data.nTotal, nb: data.nb, S: data.S, ranges: data.ranges, buffers: bufs, B, groups, ballCount: 0, ballNext: 0, ballIds: new Uint32Array(MAX_BALLS), broken: 0, statIdx: 0, statBusy: [false, false, false], pickBusy: false, actions: [] };
 }
 
 // жёстче связи — выше их частота (∝ √k), нужен пропорционально меньший подшаг
@@ -818,7 +1254,7 @@ function writeParams(action) {
   f[0] = dt; f[1] = dt * dt; f[2] = P.gravity; f[3] = P.damping; f[4] = P.friction; f[5] = P.compScale; f[6] = P.brkScale; f[7] = P.plastScale;
   u[8] = sim.nTotal; u[9] = sim.nb; u[10] = HASH_SIZE - 1; u[11] = sim.ballCount;
   f[12] = 1 / sim.S; f[13] = sim.S; u[14] = P.viewMode; u[15] = action ? action.mode : 0;
-  u[16] = action && action.obj !== undefined ? action.obj : 0;
+  u[16] = action && action.obj !== undefined ? action.obj : 0; u[17] = P.skin;
   if (action) { f[20] = action.center[0]; f[21] = action.center[1]; f[22] = action.center[2]; f[23] = action.radius; f[24] = action.vel[0]; f[25] = action.vel[1]; f[26] = action.vel[2]; f[27] = action.strength; }
   device.queue.writeBuffer(sim.B.params, 0, f);
 }
@@ -873,7 +1309,9 @@ function tick() {
     }
   }
   enc.clearBuffer(B.objSum);
-  { const p = enc.beginComputePass(); p.setPipeline(pipes.rotate); p.setBindGroup(0, G.rotate); p.dispatchWorkgroups(nG); p.setPipeline(pipes.objsum); p.setBindGroup(0, G.objsum); p.dispatchWorkgroups(nG); p.end(); }
+  { const p = enc.beginComputePass(); p.setPipeline(pipes.rotate); p.setBindGroup(0, G.rotate); p.dispatchWorkgroups(nG);
+    if (P.skin) { p.setPipeline(pipes.skin); p.setBindGroup(0, G.skin); p.dispatchWorkgroups(nG); }
+    p.setPipeline(pipes.objsum); p.setBindGroup(0, G.objsum); p.dispatchWorkgroups(nG); p.end(); }
   // статистика
   const si = sim.statIdx; let statCopied = false;
   if (!sim.statBusy[si]) { enc.copyBufferToBuffer(B.counters, 0, B.statStaging[si], 0, 64); sim.statBusy[si] = true; statCopied = true; }
@@ -885,7 +1323,9 @@ function tick() {
     colorAttachments: [{ view: msaa.color.createView(), resolveTarget: ctx.getCurrentTexture().createView(), clearValue: { r: 0.055, g: 0.067, b: 0.086, a: 1 }, loadOp: 'clear', storeOp: 'discard' }],
     depthStencilAttachment: { view: msaa.depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'discard' } });
   pass.setPipeline(renderPipes.ground); pass.setBindGroup(0, G.ground); pass.draw(6);
-  pass.setPipeline(renderPipes.cubes); pass.setBindGroup(0, G.cubes); pass.setVertexBuffer(0, geo.cube); pass.draw(36, sim.n);
+  if (P.skin === 2 && sim.ffdCount) { pass.setPipeline(renderPipes.ffd); pass.setBindGroup(0, G.ffd); pass.setIndexBuffer(sim.B.ffdIdx, 'uint32'); pass.drawIndexed(sim.ffdCount); }
+  if (P.skin) { pass.setPipeline(renderPipes.skin); pass.setBindGroup(0, G.skinR); pass.draw(36 * sim.n); }
+  else { pass.setPipeline(renderPipes.cubes); pass.setBindGroup(0, G.cubes); pass.setVertexBuffer(0, geo.cube); pass.draw(36, sim.n); }
   if (sim.ballCount) { pass.setPipeline(renderPipes.spheres); pass.setBindGroup(0, G.spheres); pass.setVertexBuffer(0, geo.sphere); pass.draw(geo.sphereCount, sim.ballCount); }
   pass.end();
   device.queue.submit([enc.finish()]);
@@ -894,7 +1334,7 @@ function tick() {
   if (pickCopied) { const req = pickRequest; pickRequest = null; const mine = sim;
     B.pickStaging.mapAsync(GPUMapMode.READ).then(() => { if (sim !== mine) return; const f = new Float32Array(B.pickStaging.getMappedRange()); const u = new Uint32Array(f.buffer); resolvePick(req, f, u, eye, vp); B.pickStaging.unmap(); sim.pickBusy = false; }).catch(() => {}); }
   frames++; if (now - fpsT > 500) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now;
-    ui('stats').innerHTML = `<b>${fps.toFixed(0)}</b> fps · кадр <b>${frameMs.toFixed(1)}</b> мс<br>вокселей: <b>${sim.n.toLocaleString('ru')}</b><br>балок: <b>${(sim.nb - sim.broken).toLocaleString('ru')}</b> / ${sim.nb.toLocaleString('ru')}<br>сломано: <b>${sim.broken.toLocaleString('ru')}</b><br>подшагов: ${effSubsteps()}${effSubsteps() !== P.substeps ? ' (' + P.substeps + ' × √жёсткости)' : ''}<br>dispatch/кадр: ${paused ? 2 : effSubsteps() * (NCOLORS + 4) + 2}`; }
+    ui('stats').innerHTML = `<b>${fps.toFixed(0)}</b> fps · кадр <b>${frameMs.toFixed(1)}</b> мс<br>вокселей: <b>${sim.n.toLocaleString('ru')}</b><br>балок: <b>${(sim.nb - sim.broken).toLocaleString('ru')}</b> / ${sim.nb.toLocaleString('ru')}<br>сломано: <b>${sim.broken.toLocaleString('ru')}</b><br>${sim.cells ? `ячеек Вороного: ${sim.cells}, ослаблено балок: ${sim.nbWeak.toLocaleString('ru')}<br>` : ''}${sim.ffdCount ? `FFD-треугольников: ${(sim.ffdCount / 3).toLocaleString('ru')}<br>` : ''}подшагов: ${effSubsteps()}${effSubsteps() !== P.substeps ? ' (' + P.substeps + ' × √жёсткости)' : ''}<br>dispatch/кадр: ${(paused ? 2 : effSubsteps() * (NCOLORS + 4) + 2) + (P.skin ? 1 : 0)}`; }
 }
 let lastT = performance.now(), frameMs = 16, fpsT = performance.now(), frames = 0, fps = 0, pickRequest = null;
 
@@ -944,10 +1384,13 @@ async function resetScene() {
   cam.target = sceneInfo.center.slice(); if (sceneInfo.dist) cam.dist = sceneInfo.dist;
   ui('launch').style.display = sceneInfo.launch ? '' : 'none';
   ui('launch').textContent = sceneInfo.launchLabel || sc.launchLabel || 'Запустить';
-  msg(''); console.log(`scene: ${data.n} nodes, ${data.nb} beams, build ${(performance.now() - t0).toFixed(0)} ms`);
+  sim.cells = data.cells; sim.nbWeak = data.nbWeak;
+  msg(''); console.log(`scene: ${data.n} nodes, ${data.nb} beams, voronoi cells ${data.cells}, weakened beams ${data.nbWeak}, ffd ${data.ffdVerts} verts / ${data.ffdCount / 3} tris, build ${(performance.now() - t0).toFixed(0)} ms`);
 }
 ui('scene').addEventListener('change', resetScene);
 ui('detail').addEventListener('change', resetScene);
+ui('voro').addEventListener('change', e => { P.voro = +e.target.value; resetScene(); });
+ui('frag').addEventListener('change', resetScene);
 ui('reset').addEventListener('click', resetScene);
 function launch() { if (!sim || !sceneInfo.launch) return; for (const a of sceneInfo.launch()) sim.actions.push({ center: [0,0,0], radius: 0, strength: 0, ...a }); }
 ui('launch').addEventListener('click', launch);
@@ -958,20 +1401,25 @@ bindSlider('stiff', v => { P.compScale = Math.pow(10, -v); }, v => Math.pow(10, 
 bindSlider('brk', v => { P.brkScale = v; }, v => v.toFixed(2));
 bindSlider('plast', v => { P.plastScale = v; }, v => v.toFixed(2));
 bindSlider('grav', v => { P.gravity = v; }, v => v.toFixed(0));
+bindSlider('frag', v => { P.fragSize = v; }, v => v.toFixed(1));
 bindSlider('carv', v => { P.carSpeed = v; }, v => v.toFixed(0));
 bindSlider('ballv', v => { P.ballSpeed = v; }, v => v.toFixed(0));
 for (const [key, sc] of Object.entries(SCENES)) { const o = document.createElement('option'); o.value = key; o.textContent = sc.name; ui('scene').appendChild(o); }
 const LEGENDS = { 1: ['0', 'порог разрыва'], 3: ['0 %', '20 % остаточной деформации'], 4: ['0', '3 ед. от формы в покое'], 5: ['0', '30 ед/с'] };
+const LEGEND_TEXT = { 6: 'цвет — ячейка Вороного; серый — материал без разбиения' };
 function updateLegend() {
   const m = P.viewMode, el = ui('legend');
   if (m === 2) el.innerHTML = MAT_KEYS.map(k => { const c = MAT_VIEW[k]; return `<span class="sw" style="background:rgb(${c.map(v => Math.round(v * 255)).join(',')})"></span>${MAT_NAMES_RU[k]}`; }).join('<br>');
   else if (LEGENDS[m]) el.innerHTML = `<div class="bar"></div><div class="ends"><span>${LEGENDS[m][0]}</span><span>${LEGENDS[m][1]}</span></div>`;
+  else if (LEGEND_TEXT[m]) el.textContent = LEGEND_TEXT[m];
   else el.innerHTML = '';
 }
 ui('view').addEventListener('change', e => { P.viewMode = +e.target.value; updateLegend(); });
+ui('skin').addEventListener('change', e => { const v = +e.target.value; const need = (v === 2) !== !!P.ffd; P.skin = v; P.ffd = v === 2 ? 1 : 0; if (need) resetScene(); });
 updateLegend();
 window.addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); ui('pause').click(); } if (e.key === 'r' || e.key === 'R' || e.key === 'к' || e.key === 'К') resetScene();
-  const views = { Digit1: 0, Digit2: 2, Digit3: 1, Digit4: 3, Digit5: 4, Digit6: 5 }; if (e.code in views) { ui('view').value = String(views[e.code]); ui('view').dispatchEvent(new Event('change')); } });
+  if (e.code === 'KeyS') { ui('skin').value = String((P.skin + 1) % 3); ui('skin').dispatchEvent(new Event('change')); }
+  const views = { Digit1: 0, Digit2: 2, Digit3: 1, Digit4: 3, Digit5: 4, Digit6: 5, Digit7: 6 }; if (e.code in views) { ui('view').value = String(views[e.code]); ui('view').dispatchEvent(new Event('change')); } });
 let dragging = false, moved = 0, lx = 0, ly = 0;
 canvas.addEventListener('mousedown', e => { dragging = true; moved = 0; lx = e.clientX; ly = e.clientY; });
 window.addEventListener('mousemove', e => { if (!dragging) return; const dx = e.clientX - lx, dy = e.clientY - ly; lx = e.clientX; ly = e.clientY; moved += Math.abs(dx) + Math.abs(dy);
