@@ -24,6 +24,19 @@
   #legend .sw { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px; }
   #legend .bar { height:8px; border-radius:4px; background:linear-gradient(90deg,#1f2673,#26bfd9,#f2e640,#e61f1a); margin:4px 0 2px; }
   #legend .ends { display:flex; justify-content:space-between; color:#8a94a6; }
+  #editor { position:absolute; left:12px; bottom:12px; width:300px; background:rgba(14,17,22,0.9); border:1px solid #2a3140; border-radius:10px; padding:10px 14px; font-size:13px; backdrop-filter: blur(6px); user-select:none; display:none; max-height:60vh; overflow:auto; }
+  #editor h2 { font-size:13px; margin:0 0 6px; font-weight:600; }
+  #editor .row { display:flex; align-items:center; justify-content:space-between; margin:5px 0; gap:8px; }
+  #editor label { flex:1; color:#b8c0cc; }
+  #editor input[type=range] { width:110px; }
+  #editor input[type=number] { width:56px; background:#1b2130; color:#e6e9ef; border:1px solid #344056; border-radius:6px; padding:3px 6px; }
+  #editor select, #editor button { background:#1b2130; color:#e6e9ef; border:1px solid #344056; border-radius:6px; padding:4px 8px; font-size:12px; cursor:pointer; }
+  #editor button.on { background:#2f6df6; border-color:#2f6df6; }
+  #editor .tools { display:flex; gap:4px; flex-wrap:wrap; margin:6px 0; }
+  #editor .btns { display:flex; gap:5px; flex-wrap:wrap; margin:6px 0; }
+  #editor textarea { width:100%; height:60px; background:#0e1116; color:#b8c0cc; border:1px solid #344056; border-radius:6px; font-size:11px; font-family:ui-monospace, Menlo, monospace; box-sizing:border-box; }
+  #editor .hint { color:#8a94a6; font-size:11px; line-height:1.4; }
+  #editor .val { width:36px; text-align:right; color:#8a94a6; }
   #msg { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); background:rgba(14,17,22,0.9); border:1px solid #2a3140; border-radius:10px; padding:14px 18px; font-size:14px; display:none; max-width:420px; line-height:1.5; }
 </style>
 </head>
@@ -44,6 +57,7 @@
     <button id="launch" class="primary">Запустить машину</button>
     <button id="reset">Сброс</button>
     <button id="pause">Пауза</button>
+    <button id="toEditor">Редактор сцен</button>
   </div>
   <div class="row"><label>Подшагов</label><input type="range" id="sub" min="4" max="20" step="1" value="10"><span class="val" id="subV">10</span></div>
   <div class="row"><label>Итераций / подшаг</label><input type="range" id="iter" min="1" max="8" step="1" value="1"><span class="val" id="iterV">1</span></div>
@@ -88,6 +102,25 @@
   </div>
 </div>
 <div id="stats"></div>
+<div id="editor">
+  <h2>Редактор сцены</h2>
+  <div class="tools">
+    <button data-tool="wall" class="on">Стена</button><button data-tool="block">Блок</button><button data-tool="beam">Балка</button>
+    <button data-tool="column">Колонна</button><button data-tool="car">Машина</button><button data-tool="delete">Удалить</button>
+  </div>
+  <div class="row"><label>Материал</label><select id="edMat"></select></div>
+  <div class="row"><label>Высота</label><input type="range" id="edHeight" min="1" max="30" value="6"><span class="val" id="edHeightV">6</span></div>
+  <div class="row"><label>Толщина / сечение</label><input type="range" id="edThick" min="1" max="6" value="1"><span class="val" id="edThickV">1</span></div>
+  <div class="row"><label>Объект (группа)</label><input type="number" id="edGroup" min="1" max="60" value="1"></div>
+  <div class="row"><label>Статичная опора</label><input type="checkbox" id="edFixed"></div>
+  <div class="row"><label>Машина смотрит</label><select id="edDir"><option value="1">+X</option><option value="-1">−X</option></select></div>
+  <div class="btns">
+    <button id="edPlay">▶ Запустить</button><button id="edStop">⟲ Сброс</button><button id="edUndo">Отменить</button><button id="edClear">Очистить</button>
+  </div>
+  <div class="btns"><button id="edExport">Экспорт → поле</button><button id="edImport">Импорт ← поле</button><button id="edExample">Пример</button></div>
+  <textarea id="edJson" spellcheck="false"></textarea>
+  <div class="hint">Клик по земле или грани детали ставит первую точку, второй клик — вторую. Колонна и машина ставятся одним кликом. Детали одной группы срастаются в один объект. Esc — отмена точки, Ctrl+Z — отмена.</div>
+</div>
 <div id="msg"></div>
 <canvas id="c"></canvas>
 
@@ -701,6 +734,20 @@ struct VOut { @builtin(position) pos: vec4f, @location(0) nrm: vec3f, @location(
   return vec4f(shade(vec3f(0.22, 0.24, 0.28), nrm, in.wpos, cam) + vec3f(spec * 0.5), 1.0);
 }`;
 
+const R_GHOST = R_COMMON + /* wgsl */`
+struct Box { mn: vec4f, mx: vec4f, color: vec4f };
+@group(0) @binding(0) var<uniform> cam: Cam;
+@group(0) @binding(1) var<uniform> box: Box;
+struct VOut { @builtin(position) pos: vec4f, @location(0) nrm: vec3f };
+@vertex fn vs(@location(0) vp: vec3f, @location(1) vn: vec3f) -> VOut {
+  var o: VOut; let p = mix(box.mn.xyz, box.mx.xyz, vp + 0.5);
+  o.pos = cam.viewProj * vec4f(p, 1.0); o.nrm = vn; return o;
+}
+@fragment fn fs(in: VOut) -> @location(0) vec4f {
+  let l = max(dot(normalize(in.nrm), normalize(cam.light.xyz)), 0.0);
+  return vec4f(box.color.rgb * (0.6 + 0.4 * l), box.color.a);
+}`;
+
 // ------------------------------------------------------------ Построение сцены (CPU)
 class Builder {
   constructor(k) {
@@ -1286,6 +1333,18 @@ const SCENES = {
     B.finalize();
     return { center: [W / 2, 8, D / 2], dist: 65 };
   } },
+  editor: { name: 'Редактор (своя сцена)', launchLabel: 'Разогнать машины', build(B, gy) {
+    const groups = new Map(); const cars = [];
+    for (const p of ED.pieces) {
+      if (p.type === 'car') { const o = B.newObject(); addCar(B, o, p.x, p.dir, gy, p.z); cars.push([o, p.dir]); continue; }
+      if (!groups.has(p.group)) groups.set(p.group, B.newObject());
+      const o = groups.get(p.group);
+      for (let x = p.x0; x <= p.x1; x++) for (let y = p.y0; y <= p.y1; y++) for (let z = p.z0; z <= p.z1; z++) B.addVoxel(o, x, y, z, [0, gy, 0], p.mat, 0.05, !!p.fixed);
+    }
+    B.finalize();
+    let cx = 0, cz = 0, n = 0, my = 0; for (const p of ED.pieces) { if (p.type === 'car') { cx += p.x + 11; cz += p.z + 5; } else { cx += (p.x0 + p.x1 + 1) / 2; cz += (p.z0 + p.z1 + 1) / 2; my = Math.max(my, p.y1); } n++; }
+    return { center: n ? [cx / n, Math.max(4, my / 2), cz / n] : [0, 5, 0], dist: n ? 60 : 50, launch: cars.length ? () => cars.map(([o, d]) => ({ mode: 1, obj: o, vel: [d * P.carSpeed, 0, 0] })) : null };
+  } },
   jelly: { name: 'Желе, башня, стекло', build(B, gy) {
     const jelly = B.newObject({ smooth: true }); const J = 12;
     for (let x = 0; x < J; x++) for (let y = 0; y < J; y++) for (let z = 0; z < J; z++) B.addVoxel(jelly, x, y, z, [-6, 14, -6], 'jelly', 0.04);
@@ -1394,7 +1453,7 @@ function buf(size, usage, data) {
 }
 const ST = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
 
-let pipes = null, renderPipes = null, geo = null, msaa = null;
+let pipes = null, renderPipes = null, geo = null, msaa = null, camBuf = null, ghostBufs = null, ghostGroups = null;
 function initPipelines() {
   pipes = { integrate: makeCompute(K_INTEGRATE), beams: makeCompute(K_BEAMS), hash: makeCompute(K_HASH), collide: makeCompute(K_COLLIDE), apply: makeCompute(K_APPLY), velocity: makeCompute(K_VELOCITY), cheb: makeCompute(K_CHEB), snap: makeCompute(K_SNAP), rotate: makeCompute(K_ROTATE), skin: makeCompute(K_SKIN), objsum: makeCompute(K_OBJSUM), actNodes: makeCompute(K_ACT_NODES), actBeams: makeCompute(K_ACT_BEAMS) };
   const mk = (code, buffers, cull, extra = {}) => device.createRenderPipeline({
@@ -1411,6 +1470,15 @@ function initPipelines() {
     ground: mk(R_GROUND, [], 'none'),
     spheres: mk(R_SPHERES, [{ arrayStride: 12, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }] }], 'back'),
   };
+  const ghostModule = device.createShaderModule({ code: R_GHOST });
+  renderPipes.ghost = device.createRenderPipeline({ layout: 'auto',
+    vertex: { module: ghostModule, entryPoint: 'vs', buffers: [{ arrayStride: 24, attributes: [{ shaderLocation: 0, offset: 0, format: 'float32x3' }, { shaderLocation: 1, offset: 12, format: 'float32x3' }] }] },
+    fragment: { module: ghostModule, entryPoint: 'fs', targets: [{ format, blend: { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } } }] },
+    primitive: { topology: 'triangle-list', cullMode: 'none' },
+    depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' }, multisample: { count: 4 } });
+  camBuf = buf(112, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+  ghostBufs = [0, 1].map(() => buf(48, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST));
+  ghostGroups = ghostBufs.map(g => bind(renderPipes.ghost, [camBuf, g]));
   const cv = cubeVerts(), sv = sphereVerts();
   geo = { cube: buf(cv.byteLength, GPUBufferUsage.VERTEX, cv), sphere: buf(sv.byteLength, GPUBufferUsage.VERTEX, sv), sphereCount: sv.length / 3 };
 }
@@ -1419,7 +1487,7 @@ function createSim(data) {
   if (sim) { for (const b of Object.values(sim.buffers)) b.destroy(); }
   const B = {};
   B.params = buf(128, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
-  B.cam = buf(112, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+  B.cam = camBuf;
   B.nodes = buf(data.nTotal * 64, ST, new Uint8Array(data.nodeBuf));
   B.nb = buf(data.nTotal * 64, ST, data.nbArr);
   B.colors = buf(data.nTotal * 16, ST, data.colors);
@@ -1456,7 +1524,7 @@ function createSim(data) {
   B.chebU = []; for (let i = 0; i < MAX_ITER; i++) B.chebU.push(buf(16, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST));
   B.statStaging = [0, 1, 2].map(() => buf(64, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST));
   B.pickStaging = buf(data.nTotal * 64, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);
-  const flat = Object.assign({}, B); delete flat.ranges; delete flat.statStaging; delete flat.chebU; const bufs = { ...flat };
+  const flat = Object.assign({}, B); delete flat.ranges; delete flat.statStaging; delete flat.chebU; delete flat.cam; const bufs = { ...flat };
   B.ranges.forEach((arr, fl) => arr.forEach((r, i) => { bufs['range' + fl + '_' + i] = r; })); B.statStaging.forEach((s, i) => bufs['stat' + i] = s); B.chebU.forEach((s, i) => bufs['cheb' + i] = s);
   const groups = {
     integrate: bind(pipes.integrate, [B.params, B.nodes, B.posK, B.posKm1]),
@@ -1517,7 +1585,7 @@ function tick() {
   }
   const action = sim.actions.shift() || null;
   writeParams(action);
-  const { eye, vp } = writeCam();
+  const { eye, vp } = writeCam(); camState = { eye, vp };
   const B = sim.B, G = sim.groups, nG = Math.ceil(sim.nTotal / WG);
   const enc = device.createCommandEncoder();
   if (action) {
@@ -1573,6 +1641,8 @@ function tick() {
   if (P.skin) { pass.setPipeline(renderPipes.skin); pass.setBindGroup(0, G.skinR); pass.draw(36 * sim.n); }
   else { pass.setPipeline(renderPipes.cubes); pass.setBindGroup(0, G.cubes); pass.setVertexBuffer(0, geo.cube); pass.draw(36, sim.n); }
   if (sim.ballCount) { pass.setPipeline(renderPipes.spheres); pass.setBindGroup(0, G.spheres); pass.setVertexBuffer(0, geo.sphere); pass.draw(geo.sphereCount, sim.ballCount); }
+  if (ED.active && paused) { const boxes = editorGhosts(); pass.setPipeline(renderPipes.ghost); pass.setVertexBuffer(0, geo.cube);
+    boxes.forEach((bx, i) => { device.queue.writeBuffer(ghostBufs[i], 0, new Float32Array([...bx.mn, 0, ...bx.mx, 0, ...bx.color])); pass.setBindGroup(0, ghostGroups[i]); pass.draw(36); }); }
   pass.end();
   device.queue.submit([enc.finish()]);
   if (statCopied) { const sb = B.statStaging[si]; const mine = sim; sim.statIdx = (si + 1) % 3;
@@ -1582,6 +1652,7 @@ function tick() {
   frames++; if (now - fpsT > 500) { fps = frames * 1000 / (now - fpsT); frames = 0; fpsT = now;
     ui('stats').innerHTML = `<b>${fps.toFixed(0)}</b> fps · кадр <b>${frameMs.toFixed(1)}</b> мс<br>вокселей: <b>${sim.n.toLocaleString('ru')}</b><br>балок: <b>${(sim.nb - sim.broken).toLocaleString('ru')}</b> / ${sim.nb.toLocaleString('ru')}<br>сломано: <b>${sim.broken.toLocaleString('ru')}</b><br>${sim.cells ? `ячеек Вороного: ${sim.cells}, ослаблено балок: ${sim.nbWeak.toLocaleString('ru')}<br>` : ''}${sim.ffdCount ? `FFD-треугольников: ${(sim.ffdCount / 3).toLocaleString('ru')}<br>` : ''}${sim.info || ''}подшагов: ${effSubsteps()}${effSubsteps() !== P.substeps ? ' (' + P.substeps + ' × √жёсткости)' : ''}<br>итераций: ${P.iterations}${P.cheb && P.iterations > 1 ? ' + Чебышёв' : ''}<br>dispatch/кадр: ${(paused ? 2 : effSubsteps() * (P.iterations * (NCOLORS + 3 + (P.cheb && P.iterations > 1 ? 2 : 0)) + 2) + 2) + (P.skin ? 1 : 0)}`; }
 }
+let camState = null;
 let lastT = performance.now(), frameMs = 16, fpsT = performance.now(), frames = 0, fps = 0, pickRequest = null;
 
 // ------------------------------------------------------------ действия
@@ -1617,6 +1688,104 @@ function resolvePick(req, f, u, eye, vp) {
   else spawnBall([eye[0] + d[0]*3, eye[1] + d[1]*3, eye[2] + d[2]*3], d);
 }
 
+// ------------------------------------------------------------ Редактор сцен
+const ED = { active: false, tool: 'wall', mat: 'brick', height: 6, thick: 1, group: 1, fixed: false, carDir: 1, pieces: [], undo: [], first: null, hover: null };
+const EXAMPLE_PIECES = [
+  { type: 'box', x0: 0, y0: 0, z0: 0, x1: 1, y1: 11, z1: 1, mat: 'steel', group: 1 }, { type: 'box', x0: 18, y0: 0, z0: 0, x1: 19, y1: 11, z1: 1, mat: 'steel', group: 1 },
+  { type: 'box', x0: 0, y0: 0, z0: 14, x1: 1, y1: 11, z1: 15, mat: 'steel', group: 1 }, { type: 'box', x0: 18, y0: 0, z0: 14, x1: 19, y1: 11, z1: 15, mat: 'steel', group: 1 },
+  { type: 'box', x0: 0, y0: 12, z0: 0, x1: 19, y1: 13, z1: 1, mat: 'metal', group: 1 }, { type: 'box', x0: 0, y0: 12, z0: 14, x1: 19, y1: 13, z1: 15, mat: 'metal', group: 1 },
+  { type: 'box', x0: 0, y0: 12, z0: 0, x1: 1, y1: 13, z1: 15, mat: 'metal', group: 1 }, { type: 'box', x0: 18, y0: 12, z0: 0, x1: 19, y1: 13, z1: 15, mat: 'metal', group: 1 },
+  { type: 'box', x0: 2, y0: 0, z0: 0, x1: 17, y1: 8, z1: 0, mat: 'brick', group: 2 }, { type: 'box', x0: 2, y0: 0, z0: 15, x1: 17, y1: 8, z1: 15, mat: 'brick', group: 2 },
+  { type: 'box', x0: 2, y0: 14, z0: 2, x1: 17, y1: 14, z1: 13, mat: 'wood', group: 3 },
+  { type: 'box', x0: 6, y0: 15, z0: 5, x1: 13, y1: 20, z1: 10, mat: 'concrete', group: 4 },
+  { type: 'car', x: -40, z: 3, dir: 1 },
+];
+function edSave() { try { localStorage.setItem('voxels-editor', JSON.stringify(ED.pieces)); } catch (e) {} }
+function edLoad() { try { const j = localStorage.getItem('voxels-editor'); if (j) ED.pieces = JSON.parse(j); } catch (e) {} }
+function pieceAABB(p) {
+  if (p.type === 'car') { const x0 = p.dir > 0 ? p.x : p.x; return [[x0, 0, p.z - 2], [x0 + 22, 11, p.z + 12]]; }
+  return [[p.x0, p.y0, p.z0], [p.x1 + 1, p.y1 + 1, p.z1 + 1]];
+}
+// луч из пикселя в мир
+function screenRay(mx, my) {
+  if (!camState) return null;
+  const inv = invert(camState.vp);
+  const nx = (mx / canvas.clientWidth) * 2 - 1, ny = -(my / canvas.clientHeight) * 2 + 1;
+  const un = (z) => { const v = [inv[0]*nx + inv[4]*ny + inv[8]*z + inv[12], inv[1]*nx + inv[5]*ny + inv[9]*z + inv[13], inv[2]*nx + inv[6]*ny + inv[10]*z + inv[14], inv[3]*nx + inv[7]*ny + inv[11]*z + inv[15]]; return [v[0]/v[3], v[1]/v[3], v[2]/v[3]]; };
+  const a = un(0), b = un(1); let d = [b[0]-a[0], b[1]-a[1], b[2]-a[2]]; const l = Math.hypot(...d); d = d.map(v => v / l);
+  return { o: camState.eye, d };
+}
+// пересечение луча с деталями и землёй → ячейка для постановки
+function editorPick(mx, my) {
+  const ray = screenRay(mx, my); if (!ray) return null;
+  const { o, d } = ray; let best = null;
+  ED.pieces.forEach((p, idx) => {
+    const [mn, mx2] = pieceAABB(p); let t0 = 0, t1 = Infinity, axis = -1, sign = 0;
+    for (let k = 0; k < 3; k++) {
+      if (Math.abs(d[k]) < 1e-9) { if (o[k] < mn[k] || o[k] > mx2[k]) return; continue; }
+      let ta = (mn[k] - o[k]) / d[k], tb = (mx2[k] - o[k]) / d[k]; let sg = -1; if (ta > tb) { [ta, tb] = [tb, ta]; sg = 1; }
+      if (ta > t0) { t0 = ta; axis = k; sign = sg; } if (tb < t1) t1 = tb; if (t0 > t1) return;
+    }
+    if (t0 > 0 && (!best || t0 < best.t)) { const n = [0, 0, 0]; n[axis] = sign; best = { t: t0, piece: idx, normal: n }; }
+  });
+  if (d[1] < 0) { const t = -o[1] / d[1]; if (!best || t < best.t) best = { t, piece: -1, normal: [0, 1, 0] }; }
+  if (!best) return null;
+  const hp = [o[0] + d[0]*best.t, o[1] + d[1]*best.t, o[2] + d[2]*best.t];
+  const cell = [Math.floor(hp[0] + best.normal[0]*0.5), Math.max(0, Math.floor(hp[1] + best.normal[1]*0.5 + 1e-4)), Math.floor(hp[2] + best.normal[2]*0.5)];
+  return { cell, piece: best.piece };
+}
+// деталь из двух точек по текущему инструменту
+function makePiece(A, Bc) {
+  const t = ED.tool, h = ED.height, th = ED.thick, base = { type: 'box', mat: ED.mat, group: ED.group, fixed: ED.fixed };
+  const xs = [Math.min(A[0], Bc[0]), Math.max(A[0], Bc[0])], zs = [Math.min(A[2], Bc[2]), Math.max(A[2], Bc[2])];
+  const alongX = Math.abs(Bc[0] - A[0]) >= Math.abs(Bc[2] - A[2]);
+  if (t === 'block') return { ...base, x0: xs[0], x1: xs[1], z0: zs[0], z1: zs[1], y0: A[1], y1: A[1] + h - 1 };
+  if (t === 'wall') return alongX ? { ...base, x0: xs[0], x1: xs[1], z0: A[2], z1: A[2] + th - 1, y0: A[1], y1: A[1] + h - 1 } : { ...base, z0: zs[0], z1: zs[1], x0: A[0], x1: A[0] + th - 1, y0: A[1], y1: A[1] + h - 1 };
+  if (t === 'beam') return alongX ? { ...base, x0: xs[0], x1: xs[1], z0: A[2], z1: A[2] + th - 1, y0: A[1], y1: A[1] + th - 1 } : { ...base, z0: zs[0], z1: zs[1], x0: A[0], x1: A[0] + th - 1, y0: A[1], y1: A[1] + th - 1 };
+  if (t === 'column') return { ...base, x0: A[0], x1: A[0] + th - 1, z0: A[2], z1: A[2] + th - 1, y0: A[1], y1: A[1] + h - 1 };
+  if (t === 'car') return { type: 'car', x: A[0], z: A[2], dir: ED.carDir };
+  return null;
+}
+const ONE_CLICK = { column: 1, car: 1, delete: 1 };
+function editorClick(mx, my) {
+  const pk = editorPick(mx, my); if (!pk) return;
+  if (ED.tool === 'delete') { if (pk.piece >= 0) { ED.undo.push(ED.pieces.slice()); ED.pieces.splice(pk.piece, 1); editorRebuild(); } return; }
+  if (ONE_CLICK[ED.tool]) { editorAdd(makePiece(pk.cell, pk.cell)); return; }
+  if (!ED.first) { ED.first = pk.cell; return; }
+  editorAdd(makePiece(ED.first, pk.cell)); ED.first = null;
+}
+function editorAdd(piece) { if (!piece) return; ED.undo.push(ED.pieces.slice()); ED.pieces.push(piece); editorRebuild(); }
+let rebuildTimer = null;
+function editorRebuild() { edSave(); ui('edJson').value = JSON.stringify(ED.pieces); clearTimeout(rebuildTimer); rebuildTimer = setTimeout(async () => { const keepCam = { ...cam, target: cam.target.slice() }; await resetScene(); Object.assign(cam, keepCam); paused = true; ui('pause').textContent = 'Продолжить'; }, 30); }
+function editorGhosts() {
+  const out = [];
+  if (ED.hover) { const c = ED.hover.cell; out.push({ mn: [c[0], c[1], c[2]], mx: [c[0] + 1, c[1] + 1, c[2] + 1], color: [1, 0.9, 0.3, 0.55] }); }
+  const A = ED.first, Bc = ED.hover ? ED.hover.cell : null;
+  const src = A ? (Bc ? makePiece(A, Bc) : makePiece(A, A)) : (Bc && ONE_CLICK[ED.tool] && ED.tool !== 'delete' ? makePiece(Bc, Bc) : null);
+  if (src) { const [mn, mx] = pieceAABB(src); const col = src.type === 'car' ? [0.9, 0.3, 0.3] : MAT_VIEW[src.mat]; out.push({ mn, mx, color: [col[0], col[1], col[2], 0.35] }); }
+  return out.slice(0, 2);
+}
+function setEditorActive(on) {
+  ED.active = on; ui('editor').style.display = on ? 'block' : 'none'; ED.first = null; ED.hover = null;
+  if (on) { paused = true; ui('pause').textContent = 'Продолжить'; }
+}
+for (const b of document.querySelectorAll('#editor [data-tool]')) b.addEventListener('click', () => { document.querySelectorAll('#editor [data-tool]').forEach(x => x.classList.remove('on')); b.classList.add('on'); ED.tool = b.dataset.tool; ED.first = null; });
+for (const k of MAT_KEYS) { const o = document.createElement('option'); o.value = k; o.textContent = MAT_NAMES_RU[k]; ui('edMat').appendChild(o); } ui('edMat').value = 'brick';
+ui('edMat').addEventListener('change', e => { ED.mat = e.target.value; });
+ui('edHeight').addEventListener('input', e => { ED.height = +e.target.value; ui('edHeightV').textContent = e.target.value; });
+ui('edThick').addEventListener('input', e => { ED.thick = +e.target.value; ui('edThickV').textContent = e.target.value; });
+ui('edGroup').addEventListener('input', e => { ED.group = Math.max(1, +e.target.value | 0); });
+ui('edFixed').addEventListener('change', e => { ED.fixed = e.target.checked; });
+ui('edDir').addEventListener('change', e => { ED.carDir = +e.target.value; });
+ui('edPlay').addEventListener('click', () => { paused = false; ui('pause').textContent = 'Пауза'; });
+ui('edStop').addEventListener('click', () => editorRebuild());
+ui('edUndo').addEventListener('click', () => { if (ED.undo.length) { ED.pieces = ED.undo.pop(); editorRebuild(); } });
+ui('edClear').addEventListener('click', () => { ED.undo.push(ED.pieces.slice()); ED.pieces = []; editorRebuild(); });
+ui('edExport').addEventListener('click', () => { ui('edJson').value = JSON.stringify(ED.pieces); ui('edJson').select(); });
+ui('edImport').addEventListener('click', () => { try { const arr = JSON.parse(ui('edJson').value); if (Array.isArray(arr)) { ED.undo.push(ED.pieces.slice()); ED.pieces = arr; editorRebuild(); } } catch (e) { msg('Не удалось разобрать JSON: ' + e.message); setTimeout(() => msg(''), 2500); } });
+ui('edExample').addEventListener('click', () => { ED.undo.push(ED.pieces.slice()); ED.pieces = EXAMPLE_PIECES.map(p => ({ ...p })); editorRebuild(); });
+edLoad();
+
 // ------------------------------------------------------------ UI
 async function resetScene() {
   const k = +ui('detail').value;
@@ -1629,6 +1798,8 @@ async function resetScene() {
   const data = B.build();
   createSim(data);
   cam.target = sceneInfo.center.slice(); if (sceneInfo.dist) cam.dist = sceneInfo.dist;
+  setEditorActive(ui('scene').value === 'editor');
+  if (ED.active) ui('edJson').value = JSON.stringify(ED.pieces);
   ui('launch').style.display = sceneInfo.launch ? '' : 'none';
   ui('launch').textContent = sceneInfo.launchLabel || sc.launchLabel || 'Запустить';
   sim.cells = data.cells; sim.nbWeak = data.nbWeak; sim.massKg = data.massKgOut;
@@ -1640,6 +1811,7 @@ ui('detail').addEventListener('change', resetScene);
 ui('voro').addEventListener('change', e => { P.voro = +e.target.value; resetScene(); });
 ui('frag').addEventListener('change', resetScene);
 ui('reset').addEventListener('click', resetScene);
+ui('toEditor').addEventListener('click', () => { ui('scene').value = 'editor'; resetScene(); });
 function launch() { if (!sim || !sceneInfo.launch) return; for (const a of sceneInfo.launch()) sim.actions.push({ center: [0,0,0], radius: 0, strength: 0, ...a }); }
 ui('launch').addEventListener('click', launch);
 ui('pause').addEventListener('click', () => { paused = !paused; ui('pause').textContent = paused ? 'Продолжить' : 'Пауза'; });
@@ -1688,14 +1860,19 @@ function updateLegend() {
 ui('view').addEventListener('change', e => { P.viewMode = +e.target.value; updateLegend(); });
 ui('skin').addEventListener('change', e => { const v = +e.target.value; const need = (v === 2) !== !!P.ffd; P.skin = v; P.ffd = v === 2 ? 1 : 0; if (need) resetScene(); });
 updateLegend();
-window.addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); ui('pause').click(); } if (e.key === 'r' || e.key === 'R' || e.key === 'к' || e.key === 'К') resetScene();
+window.addEventListener('keydown', e => { if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
+  if (e.code === 'Escape') ED.first = null; if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); ui('edUndo').click(); return; }
+  if (e.code === 'Space') { e.preventDefault(); ui('pause').click(); } if (e.key === 'r' || e.key === 'R' || e.key === 'к' || e.key === 'К') resetScene();
   if (e.code === 'KeyS') { ui('skin').value = String((P.skin + 1) % 3); ui('skin').dispatchEvent(new Event('change')); }
   const views = { Digit1: 0, Digit2: 2, Digit3: 1, Digit4: 3, Digit5: 4, Digit6: 5, Digit7: 6 }; if (e.code in views) { ui('view').value = String(views[e.code]); ui('view').dispatchEvent(new Event('change')); } });
 let dragging = false, moved = 0, lx = 0, ly = 0;
 canvas.addEventListener('mousedown', e => { dragging = true; moved = 0; lx = e.clientX; ly = e.clientY; });
-window.addEventListener('mousemove', e => { if (!dragging) return; const dx = e.clientX - lx, dy = e.clientY - ly; lx = e.clientX; ly = e.clientY; moved += Math.abs(dx) + Math.abs(dy);
+window.addEventListener('mousemove', e => {
+  if (ED.active && paused && e.target === canvas) ED.hover = editorPick(e.clientX, e.clientY);
+  if (!dragging) return; const dx = e.clientX - lx, dy = e.clientY - ly; lx = e.clientX; ly = e.clientY; moved += Math.abs(dx) + Math.abs(dy);
   cam.theta += dx * 0.006; cam.phi = Math.min(Math.PI / 2 - 0.05, Math.max(0.15, cam.phi - dy * 0.006)); });
-window.addEventListener('mouseup', e => { if (!dragging) return; dragging = false; if (moved < 5 && sim) pickRequest = { x: e.clientX, y: e.clientY, shift: e.shiftKey }; });
+window.addEventListener('mouseup', e => { if (!dragging) return; dragging = false; if (moved >= 5 || !sim) return;
+  if (ED.active && paused) editorClick(e.clientX, e.clientY); else pickRequest = { x: e.clientX, y: e.clientY, shift: e.shiftKey }; });
 canvas.addEventListener('wheel', e => { e.preventDefault(); cam.dist = Math.min(300, Math.max(8, cam.dist * Math.exp(e.deltaY * 0.0015))); }, { passive: false });
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
