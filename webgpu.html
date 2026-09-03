@@ -106,20 +106,20 @@
   <h2>Редактор сцены</h2>
   <div class="tools">
     <button data-tool="wall" class="on">Стена</button><button data-tool="block">Блок</button><button data-tool="beam">Балка</button>
-    <button data-tool="column">Колонна</button><button data-tool="car">Машина</button><button data-tool="delete">Удалить</button>
+    <button data-tool="column">Колонна</button><button data-tool="roof">Крыша</button><button data-tool="car">Машина</button><button data-tool="delete">Удалить</button>
   </div>
   <div class="row"><label>Материал</label><select id="edMat"></select></div>
   <div class="row"><label>Высота</label><input type="range" id="edHeight" min="1" max="30" value="6"><span class="val" id="edHeightV">6</span></div>
   <div class="row"><label>Толщина / сечение</label><input type="range" id="edThick" min="1" max="6" value="1"><span class="val" id="edThickV">1</span></div>
   <div class="row"><label>Объект (группа)</label><input type="number" id="edGroup" min="1" max="60" value="1"></div>
   <div class="row"><label>Статичная опора</label><input type="checkbox" id="edFixed"></div>
-  <div class="row"><label>Машина смотрит</label><select id="edDir"><option value="1">+X</option><option value="-1">−X</option></select></div>
+  <div class="row"><label>Машина смотрит</label><select id="edDir"><option value="0">+X</option><option value="1">+Z</option><option value="2">−X</option><option value="3">−Z</option></select></div>
   <div class="btns">
     <button id="edPlay">▶ Запустить</button><button id="edStop">⟲ Сброс</button><button id="edUndo">Отменить</button><button id="edClear">Очистить</button>
   </div>
   <div class="btns"><button id="edExport">Экспорт → поле</button><button id="edImport">Импорт ← поле</button><button id="edExample">Пример</button></div>
   <textarea id="edJson" spellcheck="false"></textarea>
-  <div class="hint">Клик по земле или грани детали ставит первую точку, второй клик — вторую. Колонна и машина ставятся одним кликом. Детали одной группы срастаются в один объект. Esc — отмена точки, Ctrl+Z — отмена.</div>
+  <div class="hint">Клик по земле или грани детали ставит первую точку, второй клик — вторую. Колонна и машина ставятся одним кликом. Крыша: две точки — прямоугольник, «высота» — подъём конька, «толщина» — слои. Детали одной группы срастаются в один объект. Esc — отмена точки, Ctrl+Z — отмена.</div>
 </div>
 <div id="msg"></div>
 <canvas id="c"></canvas>
@@ -1077,16 +1077,20 @@ class Builder {
 // Кузов полый: только оболочка и лонжероны по днищу. Сплошная решётка при 20 см на
 // воксель дала бы 40 с лишним тонн металла, поэтому объект строится с паспортной
 // массой (см. newObject), а геометрия задаёт лишь распределение массы и жёсткость.
-function addCar(B, obj, x0, dir, gy, z0 = 0) {
+const CAR_ROT_DIR = [[1, 0, 0], [0, 0, 1], [-1, 0, 0], [0, 0, -1]]; // куда смотрит машина при rot 0..3
+function addCar(B, obj, x0, dir, gy, z0 = 0, rot = null) {
   const L = 22, W = 10, H = 4, o = [x0, 3 + gy, z0];
-  const X = x => dir > 0 ? x : L - 1 - x; // зеркало по x
+  const r = rot === null ? (dir > 0 ? 0 : 2) : rot;
+  // локальные (x вдоль машины, z поперёк) → сетка; поворот вокруг y на r·90°
+  const T = (x, z) => r === 0 ? [x, z] : r === 2 ? [L - 1 - x, z] : r === 1 ? [z, x] : [z, L - 1 - x];
+  const put = (x, y, z, m) => { const g = T(x, z); B.addVoxel(obj, g[0], y, g[1], o, m); };
   for (let x = 0; x < L; x++) for (let y = 0; y < H; y++) for (let z = 0; z < W; z++) {
     const rail = y === 0 && (z < 2 || z > W - 3);
     if (!rail && x > 0 && x < L - 1 && y > 0 && y < H - 1 && z > 0 && z < W - 1) continue;
     if ((x === 4 || x === 5 || x === L - 6 || x === L - 5) && y < 2 && (z < 2 || z > W - 3)) continue;
     // лонжероны — та же кузовная сталь, только сплошной полосой: у конструкционной
     // стали предел текучести на порядок выше, и машина переставала бы сминаться
-    B.addVoxel(obj, X(x), y, z, o, 'metal');
+    put(x, y, z, 'metal');
   }
   for (let x = 6; x < 16; x++) for (let y = H; y < H + 4; y++) for (let z = 1; z < W - 1; z++) {
     const edge = (x === 6 || x === 15 || z === 1 || z === W - 2), top = (y === H + 3);
@@ -1094,12 +1098,12 @@ function addCar(B, obj, x0, dir, gy, z0 = 0) {
     let m = 'metal';
     if (edge && !top && y >= H + 1 && y <= H + 2) m = 'glass';
     if (edge && !top && (x === 6 || x === 15) && (z === 1 || z === W - 2)) m = 'metal'; // стойки крыши
-    B.addVoxel(obj, X(x), y, z, o, m);
+    put(x, y, z, m);
   }
   for (const cx of [5, 17]) for (const cz of [-2, W])
     for (let x = -3; x <= 3; x++) for (let y = -3; y <= 3; y++) for (let z = 0; z < 2; z++) {
-      const r = Math.hypot(x, y); if (r > 3.2) continue;
-      B.addVoxel(obj, X(cx + x), y, cz + z, o, r < 1.2 ? 'metal' : 'rubber');
+      if (Math.hypot(x, y) > 3.2) continue;
+      put(cx + x, y, cz + z, Math.hypot(x, y) < 1.2 ? 'metal' : 'rubber');
     }
   B.finalize();
 }
@@ -1336,14 +1340,15 @@ const SCENES = {
   editor: { name: 'Редактор (своя сцена)', launchLabel: 'Разогнать машины', build(B, gy) {
     const groups = new Map(); const cars = [];
     for (const p of ED.pieces) {
-      if (p.type === 'car') { const o = B.newObject(); addCar(B, o, p.x, p.dir, gy, p.z); cars.push([o, p.dir]); continue; }
+      if (p.type === 'car') { const o = B.newObject(); const rot = carRot(p); addCar(B, o, p.x, 1, gy, p.z, rot); cars.push([o, rot]); continue; }
       if (!groups.has(p.group)) groups.set(p.group, B.newObject());
       const o = groups.get(p.group);
+      if (p.type === 'roof') { forRoofCells(p, (x, y, z) => B.addVoxel(o, x, y, z, [0, gy, 0], p.mat, 0.05, !!p.fixed)); continue; }
       for (let x = p.x0; x <= p.x1; x++) for (let y = p.y0; y <= p.y1; y++) for (let z = p.z0; z <= p.z1; z++) B.addVoxel(o, x, y, z, [0, gy, 0], p.mat, 0.05, !!p.fixed);
     }
     B.finalize();
-    let cx = 0, cz = 0, n = 0, my = 0; for (const p of ED.pieces) { if (p.type === 'car') { cx += p.x + 11; cz += p.z + 5; } else { cx += (p.x0 + p.x1 + 1) / 2; cz += (p.z0 + p.z1 + 1) / 2; my = Math.max(my, p.y1); } n++; }
-    return { center: n ? [cx / n, Math.max(4, my / 2), cz / n] : [0, 5, 0], dist: n ? 60 : 50, launch: cars.length ? () => cars.map(([o, d]) => ({ mode: 1, obj: o, vel: [d * P.carSpeed, 0, 0] })) : null };
+    let cx = 0, cz = 0, n = 0, my = 0; for (const p of ED.pieces) { const [mn, mx] = pieceAABB(p); cx += (mn[0] + mx[0]) / 2; cz += (mn[2] + mx[2]) / 2; my = Math.max(my, mx[1]); n++; }
+    return { center: n ? [cx / n, Math.max(4, my / 2), cz / n] : [0, 5, 0], dist: n ? 60 : 50, launch: cars.length ? () => cars.map(([o, r]) => ({ mode: 1, obj: o, vel: CAR_ROT_DIR[r].map(v => v * P.carSpeed) })) : null };
   } },
   jelly: { name: 'Желе, башня, стекло', build(B, gy) {
     const jelly = B.newObject({ smooth: true }); const J = 12;
@@ -1689,21 +1694,36 @@ function resolvePick(req, f, u, eye, vp) {
 }
 
 // ------------------------------------------------------------ Редактор сцен
-const ED = { active: false, tool: 'wall', mat: 'brick', height: 6, thick: 1, group: 1, fixed: false, carDir: 1, pieces: [], undo: [], first: null, hover: null };
+const ED = { active: false, tool: 'wall', mat: 'brick', height: 6, thick: 1, group: 1, fixed: false, carRot: 0, pieces: [], undo: [], first: null, hover: null };
+function carRot(p) { return p.rot !== undefined ? p.rot : (p.dir < 0 ? 2 : 0); }
+// двускатная крыша над прямоугольником: конёк вдоль длинной стороны, подъём h, слоёв thick;
+// ступени между соседними рядами заполняются, чтобы скат был сплошным
+function forRoofCells(p, fn) {
+  const alongX = (p.x1 - p.x0) >= (p.z1 - p.z0);
+  const t0 = alongX ? p.z0 : p.x0, t1 = alongX ? p.z1 : p.x1, c = (t0 + t1) / 2, half = (t1 - t0) / 2 + 0.5;
+  const elev = t => Math.max(0, Math.round(p.h * (1 - Math.abs(t - c) / half)));
+  for (let t = t0; t <= t1; t++) {
+    const e = elev(t), lo = Math.min(e, t > t0 ? elev(t - 1) : e, t < t1 ? elev(t + 1) : e), hi = e + p.thick - 1;
+    for (let y = lo; y <= hi; y++) for (let u = alongX ? p.x0 : p.z0; u <= (alongX ? p.x1 : p.z1); u++) { if (alongX) fn(u, p.y0 + y, t); else fn(t, p.y0 + y, u); }
+  }
+}
 const EXAMPLE_PIECES = [
+  // стальной каркас: 4 колонны и обвязка, крыша в той же группе — срастается с каркасом
   { type: 'box', x0: 0, y0: 0, z0: 0, x1: 1, y1: 11, z1: 1, mat: 'steel', group: 1 }, { type: 'box', x0: 18, y0: 0, z0: 0, x1: 19, y1: 11, z1: 1, mat: 'steel', group: 1 },
   { type: 'box', x0: 0, y0: 0, z0: 14, x1: 1, y1: 11, z1: 15, mat: 'steel', group: 1 }, { type: 'box', x0: 18, y0: 0, z0: 14, x1: 19, y1: 11, z1: 15, mat: 'steel', group: 1 },
   { type: 'box', x0: 0, y0: 12, z0: 0, x1: 19, y1: 13, z1: 1, mat: 'metal', group: 1 }, { type: 'box', x0: 0, y0: 12, z0: 14, x1: 19, y1: 13, z1: 15, mat: 'metal', group: 1 },
   { type: 'box', x0: 0, y0: 12, z0: 0, x1: 1, y1: 13, z1: 15, mat: 'metal', group: 1 }, { type: 'box', x0: 18, y0: 12, z0: 0, x1: 19, y1: 13, z1: 15, mat: 'metal', group: 1 },
+  { type: 'roof', x0: -1, y0: 14, z0: -1, x1: 20, z1: 16, h: 6, thick: 2, mat: 'wood', group: 1 },
+  // кирпичные стены отдельной группой — только контакт с каркасом
   { type: 'box', x0: 2, y0: 0, z0: 0, x1: 17, y1: 8, z1: 0, mat: 'brick', group: 2 }, { type: 'box', x0: 2, y0: 0, z0: 15, x1: 17, y1: 8, z1: 15, mat: 'brick', group: 2 },
-  { type: 'box', x0: 2, y0: 14, z0: 2, x1: 17, y1: 14, z1: 13, mat: 'wood', group: 3 },
-  { type: 'box', x0: 6, y0: 15, z0: 5, x1: 13, y1: 20, z1: 10, mat: 'concrete', group: 4 },
-  { type: 'car', x: -40, z: 3, dir: 1 },
+  // две машины с разных сторон
+  { type: 'car', x: -40, z: 3, rot: 0 }, { type: 'car', x: 5, z: -45, rot: 1 },
 ];
 function edSave() { try { localStorage.setItem('voxels-editor', JSON.stringify(ED.pieces)); } catch (e) {} }
 function edLoad() { try { const j = localStorage.getItem('voxels-editor'); if (j) ED.pieces = JSON.parse(j); } catch (e) {} }
 function pieceAABB(p) {
-  if (p.type === 'car') { const x0 = p.dir > 0 ? p.x : p.x; return [[x0, 0, p.z - 2], [x0 + 22, 11, p.z + 12]]; }
+  if (p.type === 'car') { const r = carRot(p); return (r & 1) ? [[p.x - 2, 0, p.z], [p.x + 12, 11, p.z + 22]] : [[p.x, 0, p.z - 2], [p.x + 22, 11, p.z + 12]]; }
+  if (p.type === 'roof') return [[p.x0, p.y0, p.z0], [p.x1 + 1, p.y0 + p.h + p.thick, p.z1 + 1]];
   return [[p.x0, p.y0, p.z0], [p.x1 + 1, p.y1 + 1, p.z1 + 1]];
 }
 // луч из пикселя в мир
@@ -1740,10 +1760,11 @@ function makePiece(A, Bc) {
   const xs = [Math.min(A[0], Bc[0]), Math.max(A[0], Bc[0])], zs = [Math.min(A[2], Bc[2]), Math.max(A[2], Bc[2])];
   const alongX = Math.abs(Bc[0] - A[0]) >= Math.abs(Bc[2] - A[2]);
   if (t === 'block') return { ...base, x0: xs[0], x1: xs[1], z0: zs[0], z1: zs[1], y0: A[1], y1: A[1] + h - 1 };
+  if (t === 'roof') return { ...base, type: 'roof', x0: xs[0], x1: xs[1], z0: zs[0], z1: zs[1], y0: A[1], h, thick: th };
   if (t === 'wall') return alongX ? { ...base, x0: xs[0], x1: xs[1], z0: A[2], z1: A[2] + th - 1, y0: A[1], y1: A[1] + h - 1 } : { ...base, z0: zs[0], z1: zs[1], x0: A[0], x1: A[0] + th - 1, y0: A[1], y1: A[1] + h - 1 };
   if (t === 'beam') return alongX ? { ...base, x0: xs[0], x1: xs[1], z0: A[2], z1: A[2] + th - 1, y0: A[1], y1: A[1] + th - 1 } : { ...base, z0: zs[0], z1: zs[1], x0: A[0], x1: A[0] + th - 1, y0: A[1], y1: A[1] + th - 1 };
   if (t === 'column') return { ...base, x0: A[0], x1: A[0] + th - 1, z0: A[2], z1: A[2] + th - 1, y0: A[1], y1: A[1] + h - 1 };
-  if (t === 'car') return { type: 'car', x: A[0], z: A[2], dir: ED.carDir };
+  if (t === 'car') return { type: 'car', x: A[0], z: A[2], rot: ED.carRot };
   return null;
 }
 const ONE_CLICK = { column: 1, car: 1, delete: 1 };
@@ -1776,7 +1797,7 @@ ui('edHeight').addEventListener('input', e => { ED.height = +e.target.value; ui(
 ui('edThick').addEventListener('input', e => { ED.thick = +e.target.value; ui('edThickV').textContent = e.target.value; });
 ui('edGroup').addEventListener('input', e => { ED.group = Math.max(1, +e.target.value | 0); });
 ui('edFixed').addEventListener('change', e => { ED.fixed = e.target.checked; });
-ui('edDir').addEventListener('change', e => { ED.carDir = +e.target.value; });
+ui('edDir').addEventListener('change', e => { ED.carRot = +e.target.value; });
 ui('edPlay').addEventListener('click', () => { paused = false; ui('pause').textContent = 'Пауза'; });
 ui('edStop').addEventListener('click', () => editorRebuild());
 ui('edUndo').addEventListener('click', () => { if (ED.undo.length) { ED.pieces = ED.undo.pop(); editorRebuild(); } });
