@@ -24,7 +24,7 @@
   #legend .sw { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px; }
   #legend .bar { height:8px; border-radius:4px; background:linear-gradient(90deg,#1f2673,#26bfd9,#f2e640,#e61f1a); margin:4px 0 2px; }
   #legend .ends { display:flex; justify-content:space-between; color:#8a94a6; }
-  #editor { position:absolute; left:12px; bottom:12px; width:300px; background:rgba(14,17,22,0.9); border:1px solid #2a3140; border-radius:10px; padding:10px 14px; font-size:13px; backdrop-filter: blur(6px); user-select:none; display:none; max-height:60vh; overflow:auto; }
+  #editor { position:absolute; right:12px; top:215px; bottom:12px; width:300px; background:rgba(14,17,22,0.9); border:1px solid #2a3140; border-radius:10px; padding:10px 14px; font-size:13px; backdrop-filter: blur(6px); user-select:none; display:none; overflow:auto; }
   #editor h2 { font-size:13px; margin:0 0 6px; font-weight:600; }
   #editor .row { display:flex; align-items:center; justify-content:space-between; margin:5px 0; gap:8px; }
   #editor label { flex:1; color:#b8c0cc; }
@@ -96,8 +96,9 @@
   <div id="legend"></div>
   <div class="help">
     <b>ЛКМ</b> — выстрел ядром, <b>Shift+ЛКМ</b> — взрыв<br>
-    <b>1–7</b> — переключение вида, <b>S</b> — поверхность<br>
-    <b>Перетаскивание</b> — камера, <b>колесо</b> — зум<br>
+    <b>1–7</b> — переключение вида, <b>K</b> — поверхность<br>
+    <b>ЛКМ-перетаскивание</b> — вращать камеру, <b>ПКМ</b> или <b>Shift+ЛКМ</b> — сдвигать, <b>колесо</b> — зум<br>
+    <b>WASD / стрелки</b> — перемещение, <b>Q/E</b> — вниз/вверх<br>
     <b>Space</b> — пауза, <b>R</b> — сброс
   </div>
 </div>
@@ -108,6 +109,7 @@
     <button data-tool="wall" class="on">Стена</button><button data-tool="block">Блок</button><button data-tool="beam">Балка</button>
     <button data-tool="column">Колонна</button><button data-tool="roof">Крыша</button><button data-tool="car">Машина</button><button data-tool="delete">Удалить</button>
   </div>
+  <div class="row"><label>Шаг сетки</label><select id="edStep"><option value="1">1 (20 см)</option><option value="2">2 (40 см)</option><option value="5">5 (1 м)</option><option value="10">10 (2 м)</option></select></div>
   <div class="row"><label>Материал</label><select id="edMat"></select></div>
   <div class="row"><label>Высота</label><input type="range" id="edHeight" min="1" max="30" value="6"><span class="val" id="edHeightV">6</span></div>
   <div class="row"><label>Толщина / сечение</label><input type="range" id="edThick" min="1" max="6" value="1"><span class="val" id="edThickV">1</span></div>
@@ -533,7 +535,7 @@ const K_ACT_BEAMS = COMMON + /* wgsl */`
 
 // --- рендер ---
 const R_COMMON = /* wgsl */`
-struct Cam { viewProj: mat4x4f, camPos: vec4f, light: vec4f, fog: vec4f };
+struct Cam { viewProj: mat4x4f, camPos: vec4f, light: vec4f, fog: vec4f, grid: vec4f }; // grid: шаг мелкой сетки, 0 = не рисовать
 fn shade(base: vec3f, nrm: vec3f, wpos: vec3f, cam: Cam) -> vec3f {
   let l = normalize(cam.light.xyz);
   let diff = max(dot(nrm, l), 0.0);
@@ -713,6 +715,16 @@ struct VOut { @builtin(position) pos: vec4f, @location(0) wpos: vec3f };
   let g = abs(fract(in.wpos.xz / cell - 0.5) - 0.5) / fwidth(in.wpos.xz / cell);
   let line = 1.0 - min(min(g.x, g.y), 1.0);
   var c = mix(vec3f(0.11, 0.13, 0.17), vec3f(0.18, 0.21, 0.28), line * 0.8);
+  if (cam.grid.x > 0.0) { // мелкая сетка редактора с шагом привязки
+    let s = cam.grid.x;
+    let gm = abs(fract(in.wpos.xz / s - 0.5) - 0.5) / (fwidth(in.wpos.xz / s) * 1.5);
+    let lm = 1.0 - min(min(gm.x, gm.y), 1.0);
+    let fade = 1.0 - clamp(distance(in.wpos, cam.camPos.xyz) / 150.0, 0.0, 1.0);
+    c = mix(c, vec3f(0.36, 0.40, 0.52), lm * 0.9 * fade);
+    // оси через начало координат
+    let ax = 1.0 - min(min(abs(in.wpos.x) / fwidth(in.wpos.x), abs(in.wpos.z) / fwidth(in.wpos.z)) * 0.5, 1.0);
+    c = mix(c, vec3f(0.45, 0.5, 0.65), ax * 0.8 * fade);
+  }
   let dist = distance(in.wpos, cam.camPos.xyz);
   let f = clamp((dist - cam.fog.w) / (cam.fog.w * 1.2), 0.0, 1.0);
   return vec4f(mix(c, cam.fog.xyz, f), 1.0);
@@ -1481,7 +1493,7 @@ function initPipelines() {
     fragment: { module: ghostModule, entryPoint: 'fs', targets: [{ format, blend: { color: { srcFactor: 'src-alpha', dstFactor: 'one-minus-src-alpha' }, alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha' } } }] },
     primitive: { topology: 'triangle-list', cullMode: 'none' },
     depthStencil: { format: 'depth24plus', depthWriteEnabled: false, depthCompare: 'less' }, multisample: { count: 4 } });
-  camBuf = buf(112, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+  camBuf = buf(128, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
   ghostBufs = [0, 1].map(() => buf(48, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST));
   ghostGroups = ghostBufs.map(g => bind(renderPipes.ghost, [camBuf, g]));
   const cv = cubeVerts(), sv = sphereVerts();
@@ -1572,7 +1584,8 @@ function writeCam() {
   const eye = [t[0] + cam.dist * sp * Math.cos(cam.theta), t[1] + cam.dist * Math.cos(cam.phi), t[2] + cam.dist * sp * Math.sin(cam.theta)];
   const view = lookAt(eye, t, [0, 1, 0]), proj = perspective(55 * Math.PI / 180, aspect, 0.1, 800);
   const vp = mul(proj, view);
-  const f = new Float32Array(28); f.set(vp, 0); f.set([eye[0], eye[1], eye[2], 1], 16); f.set([0.5, 1, 0.35, 0], 20); f.set([0.055, 0.067, 0.086, 140], 24);
+  const f = new Float32Array(32); f.set(vp, 0); f.set([eye[0], eye[1], eye[2], 1], 16); f.set([0.5, 1, 0.35, 0], 20); f.set([0.055, 0.067, 0.086, 140], 24);
+  f.set([ED.active && paused ? ED.step : 0, 0, 0, 0], 28);
   device.queue.writeBuffer(sim.B.cam, 0, f);
   return { eye, vp };
 }
@@ -1581,6 +1594,7 @@ let loopEnabled = true;
 function frame() { requestAnimationFrame(frame); if (loopEnabled) tick(); }
 function tick() {
   if (!sim) return;
+  moveCamera(Math.min(0.1, (performance.now() - lastT) / 1000));
   const now = performance.now(); frameMs = frameMs * 0.9 + (now - lastT) * 0.1; lastT = now;
   const dpr = Math.min(devicePixelRatio, 2); const w = Math.floor(canvas.clientWidth * dpr), h = Math.floor(canvas.clientHeight * dpr);
   if (canvas.width !== w || canvas.height !== h || !msaa) {
@@ -1694,7 +1708,7 @@ function resolvePick(req, f, u, eye, vp) {
 }
 
 // ------------------------------------------------------------ Редактор сцен
-const ED = { active: false, tool: 'wall', mat: 'brick', height: 6, thick: 1, group: 1, fixed: false, carRot: 0, pieces: [], undo: [], first: null, hover: null };
+const ED = { active: false, tool: 'wall', mat: 'brick', height: 6, thick: 1, group: 1, fixed: false, carRot: 0, step: 1, pieces: [], undo: [], first: null, hover: null };
 function carRot(p) { return p.rot !== undefined ? p.rot : (p.dir < 0 ? 2 : 0); }
 // двускатная крыша над прямоугольником: конёк вдоль длинной стороны, подъём h, слоёв thick;
 // ступени между соседними рядами заполняются, чтобы скат был сплошным
@@ -1751,7 +1765,8 @@ function editorPick(mx, my) {
   if (d[1] < 0) { const t = -o[1] / d[1]; if (!best || t < best.t) best = { t, piece: -1, normal: [0, 1, 0] }; }
   if (!best) return null;
   const hp = [o[0] + d[0]*best.t, o[1] + d[1]*best.t, o[2] + d[2]*best.t];
-  const cell = [Math.floor(hp[0] + best.normal[0]*0.5), Math.max(0, Math.floor(hp[1] + best.normal[1]*0.5 + 1e-4)), Math.floor(hp[2] + best.normal[2]*0.5)];
+  const st = ED.step, snap = v => Math.floor(v / st) * st;
+  const cell = [snap(Math.floor(hp[0] + best.normal[0]*0.5)), Math.max(0, Math.floor(hp[1] + best.normal[1]*0.5 + 1e-4)), snap(Math.floor(hp[2] + best.normal[2]*0.5))];
   return { cell, piece: best.piece };
 }
 // деталь из двух точек по текущему инструменту
@@ -1780,7 +1795,7 @@ let rebuildTimer = null;
 function editorRebuild() { edSave(); ui('edJson').value = JSON.stringify(ED.pieces); clearTimeout(rebuildTimer); rebuildTimer = setTimeout(async () => { const keepCam = { ...cam, target: cam.target.slice() }; await resetScene(); Object.assign(cam, keepCam); paused = true; ui('pause').textContent = 'Продолжить'; }, 30); }
 function editorGhosts() {
   const out = [];
-  if (ED.hover) { const c = ED.hover.cell; out.push({ mn: [c[0], c[1], c[2]], mx: [c[0] + 1, c[1] + 1, c[2] + 1], color: [1, 0.9, 0.3, 0.55] }); }
+  if (ED.hover) { const c = ED.hover.cell, st = ED.step; out.push({ mn: [c[0], c[1], c[2]], mx: [c[0] + st, c[1] + 1, c[2] + st], color: [1, 0.9, 0.3, 0.55] }); }
   const A = ED.first, Bc = ED.hover ? ED.hover.cell : null;
   const src = A ? (Bc ? makePiece(A, Bc) : makePiece(A, A)) : (Bc && ONE_CLICK[ED.tool] && ED.tool !== 'delete' ? makePiece(Bc, Bc) : null);
   if (src) { const [mn, mx] = pieceAABB(src); const col = src.type === 'car' ? [0.9, 0.3, 0.3] : MAT_VIEW[src.mat]; out.push({ mn, mx, color: [col[0], col[1], col[2], 0.35] }); }
@@ -1798,6 +1813,7 @@ ui('edThick').addEventListener('input', e => { ED.thick = +e.target.value; ui('e
 ui('edGroup').addEventListener('input', e => { ED.group = Math.max(1, +e.target.value | 0); });
 ui('edFixed').addEventListener('change', e => { ED.fixed = e.target.checked; });
 ui('edDir').addEventListener('change', e => { ED.carRot = +e.target.value; });
+ui('edStep').addEventListener('change', e => { ED.step = +e.target.value; });
 ui('edPlay').addEventListener('click', () => { paused = false; ui('pause').textContent = 'Пауза'; });
 ui('edStop').addEventListener('click', () => editorRebuild());
 ui('edUndo').addEventListener('click', () => { if (ED.undo.length) { ED.pieces = ED.undo.pop(); editorRebuild(); } });
@@ -1884,21 +1900,45 @@ updateLegend();
 window.addEventListener('keydown', e => { if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return;
   if (e.code === 'Escape') ED.first = null; if ((e.ctrlKey || e.metaKey) && e.key === 'z') { e.preventDefault(); ui('edUndo').click(); return; }
   if (e.code === 'Space') { e.preventDefault(); ui('pause').click(); } if (e.key === 'r' || e.key === 'R' || e.key === 'к' || e.key === 'К') resetScene();
-  if (e.code === 'KeyS') { ui('skin').value = String((P.skin + 1) % 3); ui('skin').dispatchEvent(new Event('change')); }
+  if (e.code === 'KeyK') { ui('skin').value = String((P.skin + 1) % 3); ui('skin').dispatchEvent(new Event('change')); }
   const views = { Digit1: 0, Digit2: 2, Digit3: 1, Digit4: 3, Digit5: 4, Digit6: 5, Digit7: 6 }; if (e.code in views) { ui('view').value = String(views[e.code]); ui('view').dispatchEvent(new Event('change')); } });
-let dragging = false, moved = 0, lx = 0, ly = 0;
-canvas.addEventListener('mousedown', e => { dragging = true; moved = 0; lx = e.clientX; ly = e.clientY; });
+let dragging = false, panning = false, moved = 0, lx = 0, ly = 0;
+// базис камеры в горизонтальной плоскости: fwd — от камеры к цели, right — вправо
+function camBasis() { const fwd = [-Math.cos(cam.theta), 0, -Math.sin(cam.theta)]; return { fwd, right: [-fwd[2], 0, fwd[0]] }; }
+function panCamera(dx, dy) {
+  const { right } = camBasis(); const s = cam.dist * 0.0016;
+  const t = cam.target, sp = Math.sin(cam.phi);
+  const eye = [t[0] + cam.dist * sp * Math.cos(cam.theta), t[1] + cam.dist * Math.cos(cam.phi), t[2] + cam.dist * sp * Math.sin(cam.theta)];
+  let view = [t[0] - eye[0], t[1] - eye[1], t[2] - eye[2]]; const l = Math.hypot(...view); view = view.map(v => v / l);
+  const up = [right[1] * view[2] - right[2] * view[1], right[2] * view[0] - right[0] * view[2], right[0] * view[1] - right[1] * view[0]];
+  for (let k = 0; k < 3; k++) t[k] += -right[k] * dx * s + up[k] * dy * s;
+  t[1] = Math.max(0, t[1]);
+}
+canvas.addEventListener('mousedown', e => { if (e.button === 0) dragging = true; else panning = true; moved = 0; lx = e.clientX; ly = e.clientY; });
 window.addEventListener('mousemove', e => {
-  if (ED.active && paused && e.target === canvas) ED.hover = editorPick(e.clientX, e.clientY);
-  if (!dragging) return; const dx = e.clientX - lx, dy = e.clientY - ly; lx = e.clientX; ly = e.clientY; moved += Math.abs(dx) + Math.abs(dy);
+  if (ED.active && paused && e.target === canvas && !dragging && !panning) ED.hover = editorPick(e.clientX, e.clientY);
+  if (!dragging && !panning) return; const dx = e.clientX - lx, dy = e.clientY - ly; lx = e.clientX; ly = e.clientY; moved += Math.abs(dx) + Math.abs(dy);
+  if (panning || e.shiftKey) { panCamera(dx, dy); return; }
   cam.theta += dx * 0.006; cam.phi = Math.min(Math.PI / 2 - 0.05, Math.max(0.15, cam.phi - dy * 0.006)); });
-window.addEventListener('mouseup', e => { if (!dragging) return; dragging = false; if (moved >= 5 || !sim) return;
+window.addEventListener('mouseup', e => { if (panning) { panning = false; return; } if (!dragging) return; dragging = false; if (moved >= 8 || !sim) return;
   if (ED.active && paused) editorClick(e.clientX, e.clientY); else pickRequest = { x: e.clientX, y: e.clientY, shift: e.shiftKey }; });
+// перемещение с клавиатуры (удерживаемые клавиши применяются в кадре)
+const keys = new Set();
+window.addEventListener('keydown', e => { if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'INPUT') return; keys.add(e.code); });
+window.addEventListener('keyup', e => keys.delete(e.code));
+window.addEventListener('blur', () => keys.clear());
+function moveCamera(dt) {
+  if (!keys.size) return; const { fwd, right } = camBasis(); const v = cam.dist * 0.9 * dt; const t = cam.target;
+  const go = (d, k) => { for (let i = 0; i < 3; i++) t[i] += d[i] * k; };
+  if (keys.has('KeyW') || keys.has('ArrowUp')) go(fwd, v); if (keys.has('KeyS') || keys.has('ArrowDown')) go(fwd, -v);
+  if (keys.has('KeyA') || keys.has('ArrowLeft')) go(right, -v); if (keys.has('KeyD') || keys.has('ArrowRight')) go(right, v);
+  if (keys.has('KeyE')) t[1] += v; if (keys.has('KeyQ')) t[1] = Math.max(0, t[1] - v);
+}
 canvas.addEventListener('wheel', e => { e.preventDefault(); cam.dist = Math.min(300, Math.max(8, cam.dist * Math.exp(e.deltaY * 0.0015))); }, { passive: false });
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 
 // экспорт для отладки
-window.dbg = { get sim() { return sim; }, P, cam, get device() { return device; }, resetScene, spawnBall, tick, setPaused: v => { paused = v; }, setLoop: v => { loopEnabled = v; }, setAction: a => { sim.actions.push(a); }, launch,
+window.dbg = { get sim() { return sim; }, P, cam, get device() { return device; }, resetScene, spawnBall, tick, setPaused: v => { paused = v; }, setLoop: v => { loopEnabled = v; }, ED, editorPick, editorClick, keys, moveCamera, get paused() { return paused; }, setAction: a => { sim.actions.push(a); }, launch,
   bench: async (n) => { const t0 = performance.now(); for (let i = 0; i < n; i++) { tick(); await device.queue.onSubmittedWorkDone(); } return (performance.now() - t0) / n; } };
 
 try { await initGPU(); initPipelines(); await resetScene(); requestAnimationFrame(frame); }
