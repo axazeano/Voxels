@@ -23,9 +23,9 @@ jobs:
       # CPU-версия доступна как cpu.html, оригинальные имена тоже сохраняются.
       - run: |
           mkdir -p site
-          cp webgpu.html site/index.html
+          cp README.md webgpu.html site/
           cp index.html site/cpu.html
-          cp webgpu.html index.html README.md site/ 2>/dev/null || true
+          cp webgpu.html site/index.html
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site
