@@ -14,6 +14,8 @@
 
 ## Запуск
 
+Онлайн: https://axazeano.github.io/Voxels/ (WebGPU-версия; CPU-версия — /cpu.html).
+
 `webgpu.html` — нужен браузер с WebGPU (Chrome/Edge, Safari 26+); открывается
 как файл, внешних зависимостей нет. `index.html` грузит three.js с CDN.
 Либо поднять любой статический сервер:
